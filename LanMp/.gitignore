@@ -1,0 +1,34 @@
+# Build
+bin/
+obj/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+.vs/
+*.dll
+*.pdb
+*.mdb
+*.cache
+project.lock.json
+
+# Local run / release artifacts (rebuild or GitHub Releases)
+dist/
+logs/
+*.log
+
+# Decompile / reflect scratch (not product source)
+_audit_decomp/
+_audit_reflect.txt
+**/_tmp_*/
+*.decompiled.cs
+
+# OS / editor
+Thumbs.db
+Desktop.ini
+.DS_Store
+*.swp
+*~
+
+# Local dual-instance markers (if ever dropped under LanMp)
+LanMp.ForceNoSteam

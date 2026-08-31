@@ -1,0 +1,21 @@
+# AnnW LanMp — source repo rooted at the game install folder.
+# Only track plugin sources + design docs; ignore the Steam game tree.
+
+# Ignore everything at root by default
+/*
+
+# Keep this file and the plugin / docs trees
+!/.gitignore
+!/LanMp/
+!/docs/
+!/.cursor/
+
+# docs: only lan-mp design docs
+/docs/*
+!/docs/lan-mp/
+
+# .cursor: only LanMp architecture gate rule
+/.cursor/*
+!/.cursor/rules/
+/.cursor/rules/*
+!/.cursor/rules/lanmp-architecture.mdc

@@ -1,0 +1,29 @@
+---
+description: LanMp architecture invariants — no TurnLoop symptom patches
+alwaysApply: true
+---
+
+# AnnW LanMp — Architecture Gate
+
+When working under `LanMp/` or `docs/lan-mp/`:
+
+## Non-negotiable (ADR-004 / INV-T*)
+
+1. **Turn cursor** (`turns`, `current_co_index`, `cur_player`) advances on Host only via vanilla turn code; Guest applies **only** through `EndTurn` Command fields (`nextPlayerIndex`, `turnsAfter`).
+2. **Never** fix desync by adding another Harmony `Prefix` that calls `MannualEndTurn` on Guest to "catch up".
+3. All battle `Command` applies go through **`CommandApplyQueue`** (serial). No parallel `CoApply*`.
+4. Non-local seats (remote human + all AI) use **one** RemoteWatch path.
+5. LAN: do not let `last_human_player.defeated` alone stop the global turn loop.
+6. MatchEnd is Host-only and multi-seat; no single-bool fake settlement as the design.
+7. Solo / campaign: no LAN turn hooks unless `InLanBattle` / `StartAuthorized`.
+8. **INV-VIEW:** In LAN, `last_human_player` means **local FOW/UI viewer**, never the remote human whose turn it is. Do not let vanilla hotseat assignment fight FOWDirty rebinding (main-thread FOW re-entry freeze on Host EndTurn→Guest).
+9. Host authoritative EndTurn Accept uses **`SuppressNetworkEmit` only** — never `ApplyingRemoteCommand` (that flag is Guest/replay).
+10. **CoroutineObject ≠ Unity:** `yield return null` on `GameController` busy-spins the same `ExecuteContext` (Host EndTurn white-screen). Waits must use `AnnWCoroutine.NextTick` (`0f`) so `Update` can pump `TurnLoop`.
+11. **Checksum:** LAN checkpoints are EndTurn `stateHash` over the **attachment payload**. Recapture/`Save_General` drift after Apply must not Strict-pause Guest (Apply is lossy; Host attachment is ADR-001 truth).
+12. **Guest Intent in-flight:** Guest may have at most one mutating Intent awaiting Host Command/Nack. No click-spam Accept. Host Accept must `SuppressNetworkEmit` through `HostBroadcastCommand` so Bus cannot emit a twin Command.
+
+## Process
+
+- Architectural failures (split operators, double EndTurn, Host-defeat kills match) → change `TurnAuthority` / `CommandApplyQueue` / MatchEnd — **not** a one-off Prefix.
+- Feature work (Guest AutoCmd, etc.) waits until P0 turn authority acceptance criteria pass.
+- Declare which INV-T* a change upholds in the PR/commit message or reply.
