@@ -178,6 +178,34 @@ namespace AnnW.LanMp.Tests
         }
 
         [Fact]
+        public void ResultAttachment_wrecks_roundtrip_and_hasPayload()
+        {
+            var onlyWrecks = new ResultAttachmentDto
+            {
+                turn = 1,
+                coIndex = 0,
+                wrecks = new[]
+                {
+                    new WreckSnapDto { x = 2, y = -3, amount = 150 }
+                }
+            };
+            Assert.True(ResultAttachmentCodec.HasPayload(onlyWrecks));
+            var back = ResultAttachmentCodec.FromJson(ResultAttachmentCodec.ToJson(onlyWrecks));
+            Assert.Single(back.wrecks);
+            Assert.Equal(2, back.wrecks[0].x);
+            Assert.Equal(-3, back.wrecks[0].y);
+            Assert.Equal(150, back.wrecks[0].amount);
+
+            // Empty wrecks array is still payload (clear-all on Guest).
+            Assert.True(ResultAttachmentCodec.HasPayload(new ResultAttachmentDto
+            {
+                wrecks = new WreckSnapDto[0]
+            }));
+            // Legacy omit
+            Assert.False(ResultAttachmentCodec.HasPayload(new ResultAttachmentDto()));
+        }
+
+        [Fact]
         public void StateSnapshotDto_roundtrip_embeds_attachment()
         {
             var snap = new StateSnapshotDto

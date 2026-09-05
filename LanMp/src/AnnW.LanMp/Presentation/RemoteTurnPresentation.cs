@@ -43,6 +43,10 @@ namespace AnnW.LanMp.Presentation
             if (battle == null || seat == null)
                 return;
 
+            // Spectating with leftover MOVE_SELECT shows *own* attack extend instead of enemy hover threat.
+            if (!isLocalHuman || seat.is_ai)
+                ClearSpectateUxOverlays("seat-activated", log);
+
             if (battle.turns == _lastHintTurn && seat.index == _lastHintSeat)
                 return;
             _lastHintTurn = battle.turns;
@@ -55,6 +59,39 @@ namespace AnnW.LanMp.Presentation
 
             if (isLocalHuman && !seat.is_ai)
                 ScheduleControlGrant(log);
+        }
+
+        /// <summary>
+        /// Drop local selection / move-attack overlays when entering spectate so hover threat
+        /// (TargetSel_Hover UX_NONE) is not buried under stale own-unit MOVE_SELECT zones.
+        /// </summary>
+        internal static void ClearSpectateUxOverlays(string reason, ManualLogSource log = null)
+        {
+            if (!GateUtil.LanArmed(out _))
+                return;
+            try
+            {
+                var ux = UX_Manager.self;
+                var battle = GS_Battle.self;
+                var hadSel = battle?.selected_units != null && battle.selected_units.Count > 0;
+                var hadUx = battle != null && battle.ux_state != UX_State.NONE;
+                ux?.ClearUnitSelection(true);
+                ux?.ClearHoverUnits();
+                ux?.CheckUnitsAndSetUXState();
+
+                var hover = Object.FindFirstObjectByType<TargetSel_Hover>();
+                hover?.ClearAndRefresh();
+                var bas = Object.FindFirstObjectByType<TargetSel_Base>();
+                bas?.Clear();
+                bas?.MarkDirty();
+
+                if (hadSel || hadUx)
+                    log?.LogInfo("[Presentation] Cleared spectate UX overlays (" + reason + ")");
+            }
+            catch (System.Exception ex)
+            {
+                log?.LogWarning("[Presentation] ClearSpectateUxOverlays: " + ex.Message);
+            }
         }
 
         internal static void RefreshLocalVision(ManualLogSource log = null)

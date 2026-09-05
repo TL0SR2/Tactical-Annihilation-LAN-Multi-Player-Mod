@@ -21,7 +21,7 @@ namespace AnnW.LanMp
     {
         public const string PluginGuid = "annw.lanmp";
         public const string PluginName = "AnnW LAN Multiplayer";
-        public const string PluginVersion = "0.16.8";
+        public const string PluginVersion = "0.16.12";
 
         internal static LanMpPlugin Instance { get; private set; }
         internal static ManualLogSource Log { get; private set; }

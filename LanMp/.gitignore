@@ -32,3 +32,8 @@ Desktop.ini
 
 # Local dual-instance markers (if ever dropped under LanMp)
 LanMp.ForceNoSteam
+
+# Local-only test helpers (not part of LanMp product / GitHub)
+tools/AnnW.TestUnlockPS/
+tools/AnnW.TestUnlockCOs/
+tools/_tmp_*/

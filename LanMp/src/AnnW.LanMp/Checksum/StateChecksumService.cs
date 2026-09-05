@@ -128,6 +128,14 @@ namespace AnnW.LanMp.Checksum
                         .Append(';');
                 }
             }
+            if (board.wrecks != null)
+            {
+                foreach (var w in board.wrecks.OrderBy(x => x.x).ThenBy(x => x.y))
+                {
+                    if (w == null || w.amount <= 0) continue;
+                    sb.Append('w').Append(w.x).Append(',').Append(w.y).Append(':').Append(w.amount).Append(';');
+                }
+            }
             return Sha16(sb.ToString());
         }
 

@@ -11,7 +11,12 @@ namespace AnnW.LanMp.Sync
         {
             var battle = GS_Battle.self;
             if (battle == null)
-                return new ResultAttachmentDto { units = new UnitSnapDto[0], players = new PlayerSnapDto[0] };
+                return new ResultAttachmentDto
+                {
+                    units = new UnitSnapDto[0],
+                    players = new PlayerSnapDto[0],
+                    wrecks = new WreckSnapDto[0]
+                };
 
             var units = new List<UnitSnapDto>();
             if (battle.all_unit?.units_alive != null)
@@ -44,13 +49,42 @@ namespace AnnW.LanMp.Sync
                 }
             }
 
+            var wrecks = CaptureWrecks(battle);
+
             return new ResultAttachmentDto
             {
                 turn = battle.turns,
                 coIndex = battle.current_co_index,
                 units = units.ToArray(),
-                players = players.ToArray()
+                players = players.ToArray(),
+                wrecks = wrecks
             };
+        }
+
+        /// <summary>All tiles with wreck_amount &gt; 0 (empty array when none — still authoritative).</summary>
+        public static WreckSnapDto[] CaptureWrecks(GS_Battle battle = null)
+        {
+            battle = battle ?? GS_Battle.self;
+            var list = new List<WreckSnapDto>();
+            var tiles = battle?.terrain?.valid_tiles_list;
+            if (tiles == null)
+                return list.ToArray();
+
+            foreach (var pos in tiles)
+            {
+                GameTileData tile = null;
+                try { tile = GameTileData.Get(pos); }
+                catch { /* ignore */ }
+                if (tile == null || tile.wreck_amount <= 0)
+                    continue;
+                list.Add(new WreckSnapDto
+                {
+                    x = pos.x,
+                    y = pos.y,
+                    amount = tile.wreck_amount
+                });
+            }
+            return list.ToArray();
         }
 
         public static ResultAttachmentDto CaptureFocused(UnitData primary, ManualLogSource log = null)
@@ -206,6 +240,13 @@ namespace AnnW.LanMp.Sync
 
                         if (us.dead && !unit.dead)
                         {
+                            try
+                            {
+                                // Presentation-only death cue before authoritative remove (Guest attach-only path).
+                                GameAPI.self.PlayUnitDeathAnimation(
+                                    unit.pos, 0f, unit, DieReason.COMBAT, null, null, null);
+                            }
+                            catch { /* ignore */ }
                             try { GameAPI.self.RemoveUnit(unit); }
                             catch (System.Exception ex) { log?.LogWarning("[Attach] RemoveUnit: " + ex.Message); }
                         }
@@ -239,12 +280,65 @@ namespace AnnW.LanMp.Sync
                     battle.turns = dto.turn;
                 if (dto.coIndex >= 0)
                     battle.current_co_index = dto.coIndex;
+
+                // After unit remove: stamp Host wreck amounts (Guest RemoveUnit never Die→CreateWreck).
+                ApplyWrecks(dto.wrecks, battle, log);
             }
 
             log?.LogInfo(
-                $"[Attach] Applied units={dto.units?.Length ?? 0} players={dto.players?.Length ?? 0} res={applyPlayerResources} seat={playerResourceSeatFilter?.ToString() ?? "*"}");
+                $"[Attach] Applied units={dto.units?.Length ?? 0} players={dto.players?.Length ?? 0} wrecks={dto.wrecks?.Length.ToString() ?? "omit"} res={applyPlayerResources} seat={playerResourceSeatFilter?.ToString() ?? "*"}");
             RefreshUnactionedLists(log);
         }
+
+        /// <summary>
+        /// Authoritative wreck set. Null = legacy omit. Empty = clear all. Else set listed tiles and clear others.
+        /// Writes wreck_amount directly — never CreateWreck (Host Random must not re-roll on Guest).
+        /// </summary>
+        public static void ApplyWrecks(WreckSnapDto[] wrecks, GS_Battle battle = null, ManualLogSource log = null)
+        {
+            if (wrecks == null)
+                return;
+            battle = battle ?? GS_Battle.self;
+            if (battle?.terrain?.valid_tiles_list == null)
+                return;
+
+            var want = new Dictionary<long, int>();
+            foreach (var w in wrecks)
+            {
+                if (w == null || w.amount <= 0)
+                    continue;
+                want[PackPos(w.x, w.y)] = w.amount;
+            }
+
+            var changed = 0;
+            foreach (var pos in battle.terrain.valid_tiles_list)
+            {
+                GameTileData tile = null;
+                try { tile = GameTileData.Get(pos); }
+                catch { /* ignore */ }
+                if (tile == null)
+                    continue;
+
+                var key = PackPos(pos.x, pos.y);
+                var target = want.TryGetValue(key, out var amt) ? amt : 0;
+                if (tile.wreck_amount == target)
+                    continue;
+
+                tile.wreck_amount = target;
+                try { BattleEventBus.self.TriggerWreckChanged(tile); }
+                catch { /* ignore */ }
+                changed++;
+            }
+
+            if (changed > 0)
+            {
+                try { BattleEventBus.self.TriggerWreckAllChanged(); }
+                catch { /* ignore */ }
+                log?.LogInfo($"[Attach] Wrecks applied set={want.Count} changed={changed}");
+            }
+        }
+
+        private static long PackPos(int x, int y) => ((long)x << 32) ^ (uint)y;
 
         /// <summary>
         /// Vanilla EndTurn popup reads Player.unactioned_units cache; setting actioned alone is not enough.

@@ -2,22 +2,36 @@
 
 遭遇战局域网联机插件源码（设计见 `../docs/lan-mp/`）。
 
-当前版本：**0.16.8**（`Plugin.cs` → `PluginVersion`）。
+当前版本：**0.16.12**（`Plugin.cs` → `PluginVersion`）。
 
 ## 版本管理（Git）
 
 本游戏安装目录已初始化 Git（白名单：仅 `LanMp/`、`docs/lan-mp/`、架构 rule）。  
 `dist/`、`logs/`、反编译缓存与游戏本体**不入库**。
 
-配置 GitHub 远程后推送示例：
+远程仓库：https://github.com/TL0SR2/Tactical-Annihilation-LAN-Multi-Player-Mod
 
 ```powershell
 cd "E:\SteamLibrary\steamapps\common\Tactical Annihilation"
-git remote add origin https://github.com/<you>/<repo>.git
 git push -u origin main
-git push origin v0.16.8
+git push origin v0.16.12
 ```
 
+## 分发包
+
+Release zip（含 BepInEx 5.4 + 本插件）解压到游戏根目录即可：
+
+```text
+winhttp.dll / doorstop_config.ini / BepInEx/...
+```
+
+本地打包：
+
+```powershell
+powershell -File "LanMp\tools\Pack-Release.ps1"
+```
+
+产出：`LanMp\dist\AnnW.LanMp-<version>-with-BepInEx.zip`
 ## 依赖
 
 - 游戏目录已安装 **BepInEx 5.4.x**（`win_x64`）

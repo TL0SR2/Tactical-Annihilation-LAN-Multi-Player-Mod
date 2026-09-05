@@ -40,6 +40,12 @@ namespace AnnW.LanMp.Protocol
             return kind == "UnitMoved" || kind == "DoAction";
         }
 
+        /// <summary>
+        /// Guest attach-only DoAction should still play Event_DoActionAni when Host did not skip.
+        /// </summary>
+        public static bool ShouldPresentAttachOnlyDoAction(float moveDuration) =>
+            !ShouldFastPresent(moveDuration, "DoAction");
+
         public static float ResolveMoveDuration(float cmdMoveDuration, float templateAniSpeed, float fallback = 0.2f)
         {
             if (ShouldFastPresent(cmdMoveDuration, "UnitMoved"))
@@ -71,6 +77,55 @@ namespace AnnW.LanMp.Protocol
             if (unitOwnerIndex == localHumanIndex)
                 return true;
             return unitVisibleToLocalViewer;
+        }
+
+        /// <summary>
+        /// INV-VIEW: only rewrite GetMoveZone FOW for the local viewer's own/ally units.
+        /// Enemy threat previews must keep the unit owner's FOW (otherwise ranges skew).
+        /// </summary>
+        public static bool UseLocalViewerFowForMoveZone(
+            bool inLanBattle,
+            bool gatesArmed,
+            bool hasLocalHuman,
+            int unitFraction,
+            int localViewerFraction)
+        {
+            if (!inLanBattle || !gatesArmed || !hasLocalHuman)
+                return false;
+            return unitFraction == localViewerFraction;
+        }
+
+        /// <summary>
+        /// Vanilla clears hover threat when control_state != Human (AI turns).
+        /// LAN still wants enemy/ally hover threat while spectating remote/AI seats.
+        /// Script/AutoGuide stay suppressed.
+        /// </summary>
+        public static bool ShouldSuppressHoverThreatOverlay(
+            bool inLanBattle,
+            bool gatesArmed,
+            bool isScript,
+            bool isAutoGuide,
+            bool isAiProcessing)
+        {
+            if (isScript || isAutoGuide)
+                return true;
+            if (!inLanBattle || !gatesArmed)
+                return isAiProcessing;
+            return false;
+        }
+
+        public static bool ShouldRenderHoverThreatOverlay(
+            bool inLanBattle,
+            bool gatesArmed,
+            bool isScript,
+            bool isAutoGuide,
+            bool isHumanControl)
+        {
+            if (isScript || isAutoGuide)
+                return false;
+            if (!inLanBattle || !gatesArmed)
+                return isHumanControl;
+            return true;
         }
     }
 }

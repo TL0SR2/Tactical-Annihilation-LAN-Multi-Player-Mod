@@ -1103,7 +1103,17 @@ namespace AnnW.LanMp.Sync
                 return false;
 
             if (intent.kind == "Undo")
+            {
+                var n = 0;
+                try { n = GS_Battle.self?.undo_move?.GetUndoMoveCount() ?? 0; }
+                catch { n = 0; }
+                if (!IntentValidateRules.CanAcceptUndo(n))
+                {
+                    error = "nothing-to-undo";
+                    return false;
+                }
                 return true;
+            }
 
             if (intent.kind == "DoAction" || intent.kind == "UnitMoved")
             {
@@ -1159,6 +1169,8 @@ namespace AnnW.LanMp.Sync
                     return "该单位本回合已移动";
                 case "already-actioned":
                     return "该单位本回合已行动";
+                case "nothing-to-undo":
+                    return "没有可撤回的移动";
                 case "not-current-player":
                 case "turn-mismatch":
                     return null;
@@ -1257,7 +1269,11 @@ namespace AnnW.LanMp.Sync
             {
                 var attach = ResultAttachmentCodec.FromJson(cmd.resultAttachmentJson);
                 if (ResultAttachmentCodec.HasPayload(attach))
+                {
                     ApplyResultAttachment(attach, cmd.kind, snapPositions: true);
+                    if (cmd.kind == "Undo")
+                        ActionPresentation.AfterAttachApply(attach, _log, cmd, null);
+                }
             }
             catch (Exception ex)
             {
@@ -1487,27 +1503,18 @@ namespace AnnW.LanMp.Sync
 
             // Guest + Host attachment: never re-simulate (BUILD double-spawn / ATTACK RNG ghosts).
             // Host Accept has no attachment yet and must ExecuteAction.
+            // Presentation-only: fire Event_DoActionAni before attach so Guest still sees attack/build cues.
             if (AttachmentApplyPolicy.ShouldGuestAttachOnlyDoAction(isGuest, hasAttach) ||
                 (isBuildLike && hasAttach && isGuest))
             {
-                TryLookAtUnit(unit);
-                ApplyResultAttachment(attachEarly, "DoAction", snapPositions: false);
-                ActionPresentation.AfterAttachApply(attachEarly, _log, cmd, idsBefore);
-                EnsureUnitActed(unit);
-                ResultAttachmentBridge.RefreshUnactionedLists(_log);
-                _log.LogInfo($"[Sync] Applied DoAction(attach-only) unit={cmd.netUnitId} cate={cate}");
+                yield return CoApplyDoActionAttachOnly(cmd, unit, cate, attachEarly, idsBefore, "guest");
                 yield break;
             }
 
             // Host BUILD/TRAIN with attachment (rare) — still attach-only to avoid double create.
             if (isBuildLike && hasAttach)
             {
-                TryLookAtUnit(unit);
-                ApplyResultAttachment(attachEarly, "DoAction", snapPositions: false);
-                ActionPresentation.AfterAttachApply(attachEarly, _log, cmd, idsBefore);
-                EnsureUnitActed(unit);
-                ResultAttachmentBridge.RefreshUnactionedLists(_log);
-                _log.LogInfo($"[Sync] Applied DoAction(attach-only) unit={cmd.netUnitId} cate={cate}");
+                yield return CoApplyDoActionAttachOnly(cmd, unit, cate, attachEarly, idsBefore, "host-build");
                 yield break;
             }
 
@@ -1550,6 +1557,40 @@ namespace AnnW.LanMp.Sync
             }
 
             TryLookAtUnit(unit);
+        }
+
+        /// <summary>
+        /// Attach-only apply with optional visual kick (Event_DoActionAni) — no ExecuteAction / DoActionCell.
+        /// Upholds ADR-001 attachment truth + ADR-003 R4 (presentation may diverge).
+        /// </summary>
+        private IEnumerator CoApplyDoActionAttachOnly(
+            CommandDto cmd,
+            UnitData unit,
+            ActionCate cate,
+            ResultAttachmentDto attachEarly,
+            HashSet<int> idsBefore,
+            string tag)
+        {
+            EnsureTrainTemplate(unit, cate, cmd);
+            TryLookAtUnit(unit);
+
+            var skipAnim = !PresentationRules.ShouldPresentAttachOnlyDoAction(cmd.moveDuration);
+            var tile = ResolveActionTile(cmd);
+            var wait = 0f;
+            if (!skipAnim)
+                wait = ActionPresentation.KickDoActionVisual(unit, cate, tile, _log);
+
+            if (wait > 0.001f)
+                yield return wait;
+
+            ActionPresentation.FinishDoActionVisual(unit);
+
+            ApplyResultAttachment(attachEarly, "DoAction", snapPositions: false);
+            ActionPresentation.AfterAttachApply(attachEarly, _log, cmd, idsBefore);
+            EnsureUnitActed(unit);
+            ResultAttachmentBridge.RefreshUnactionedLists(_log);
+            _log.LogInfo(
+                $"[Sync] Applied DoAction(attach-only/{tag}) unit={cmd.netUnitId} cate={cate} presentWait={wait:0.###}");
         }
 
         private static void EnsureUnitActed(UnitData unit)
@@ -1674,7 +1715,7 @@ namespace AnnW.LanMp.Sync
             TryLookAtUnit(unit);
 
             // Host AcceptIntent: run real DoMove so game logic (undo/transport) matches.
-            // Guest replay: visual move is enough; attachment reconciles.
+            // Guest Intent moves never hit EQ AddUndoMoveBatch — push Host stack here or Undo is a no-op.
             if (_net.Role == PeerRole.Host)
             {
                 Exception moveErr = null;
@@ -1682,6 +1723,7 @@ namespace AnnW.LanMp.Sync
                 {
                     if (unit.pos.x != from.x || unit.pos.y != from.y)
                         GameAPI.self.MoveUnitInstantly(unit, from);
+                    HostPushUndoForAcceptedMove(unit, from, to);
                     unit.DoMove(to);
                 }
                 catch (Exception ex)
@@ -1864,13 +1906,61 @@ namespace AnnW.LanMp.Sync
                     _log.LogWarning("[Sync] GS_Battle.undo_move null");
                     return;
                 }
+                var before = undo.GetUndoMoveCount();
                 undo.UndoLastMove();
-                _log.LogInfo("[Sync] Applied Undo");
+                var after = undo.GetUndoMoveCount();
+                if (before <= 0 || after >= before)
+                    _log.LogWarning($"[Sync] UndoLastMove no-op stack before={before} after={after}");
+                else
+                    _log.LogInfo($"[Sync] Applied Undo stack {before}→{after}");
             }
             catch (Exception ex)
             {
                 _log.LogWarning("[Sync] Undo apply: " + ex.Message);
             }
+        }
+
+        /// <summary>
+        /// Guest Intent UnitMoved never goes through EQ AddUndoMoveBatch.
+        /// Host must push the batch before DoMove so Undo Intent can UndoLastMove (ADR-001).
+        /// </summary>
+        private void HostPushUndoForAcceptedMove(UnitData unit, Inctor2 from, Inctor2 to)
+        {
+            if (unit == null)
+                return;
+            var undo = GS_Battle.self?.undo_move;
+            if (undo == null)
+                return;
+            try
+            {
+                if (GS_Battle.self.functions != null &&
+                    GS_Battle.self.functions.Querry(GAME_FUNCTION.NoUndoMove))
+                    return;
+            }
+            catch { /* ignore */ }
+
+            UnitData transporter = null;
+            try
+            {
+                var gtd = GameAPI.self != null ? GameAPI.self.GetTile(to) : null;
+                var other = gtd != null ? gtd.GetUnit() : null;
+                if (other != null && other != unit && other.wp_transport != null)
+                    transporter = other;
+            }
+            catch { /* ignore */ }
+
+            var batch = new List<UndoableMoveInfo>
+            {
+                new UndoableMoveInfo
+                {
+                    unit = unit,
+                    pos = from,
+                    transporter = transporter
+                }
+            };
+            undo.AddUndoMoveBatch(batch);
+            _log.LogInfo(
+                $"[Sync] Host undo stack push unit={unit.unit_id} from=({from.x},{from.y}) depth={undo.GetUndoMoveCount()}");
         }
 
         private void OnEnvelope(Envelope env)

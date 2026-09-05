@@ -18,6 +18,9 @@ namespace AnnW.LanMp.Patches
         private static readonly MethodInfo GetUxViewFraction =
             AccessTools.Method(typeof(ViewUtil), nameof(ViewUtil.GetUxViewFraction));
 
+        private static readonly MethodInfo GetMoveZoneFowFraction =
+            AccessTools.Method(typeof(ViewUtil), nameof(ViewUtil.GetMoveZoneFowFraction));
+
         private static readonly MethodInfo GetFraction =
             AccessTools.Property(typeof(UnitData), nameof(UnitData.fraction))?.GetGetMethod();
 
@@ -30,9 +33,11 @@ namespace AnnW.LanMp.Patches
             private static IEnumerable<CodeInstruction> Transpiler(IEnumerable<CodeInstruction> instructions)
             {
                 var codes = new List<CodeInstruction>(instructions);
-                if (GetFraction == null || BattleSelfField == null)
+                if (GetFraction == null || BattleSelfField == null || GetMoveZoneFowFraction == null)
                     return codes;
 
+                // this.fraction → AcquireFOWMap  ⇒  this, GS_Battle.self → GetMoveZoneFowFraction
+                // Own/ally keep INV-VIEW FOW; enemy threat previews keep owner FOW.
                 for (var i = 0; i < codes.Count; i++)
                 {
                     if (codes[i].opcode != OpCodes.Callvirt ||
@@ -47,8 +52,11 @@ namespace AnnW.LanMp.Patches
                         !(codes[i - 2].opcode == OpCodes.Ldarg_S && codes[i - 2].operand?.ToString() == "0"))
                         continue;
 
-                    codes[i - 2] = new CodeInstruction(OpCodes.Ldsfld, BattleSelfField);
-                    codes[i - 1] = new CodeInstruction(OpCodes.Call, GetUxViewFraction);
+                    // ldarg_0 (unit) already at i-2; replace get_fraction with battle + helper.
+                    codes[i - 1] = new CodeInstruction(OpCodes.Ldsfld, BattleSelfField);
+                    codes.Insert(i, new CodeInstruction(OpCodes.Call, GetMoveZoneFowFraction));
+                    // AcquireFOWMap shifted by +1 after Insert
+                    i++;
                 }
                 return codes;
             }

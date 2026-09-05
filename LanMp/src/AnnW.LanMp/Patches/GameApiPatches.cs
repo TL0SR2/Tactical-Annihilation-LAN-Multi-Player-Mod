@@ -474,10 +474,8 @@ namespace AnnW.LanMp.Patches
                 return;
             if (!GateUtil.IsBattlePlayPhase())
                 return;
-            // Guest local stack is always empty; use Host-stamped depth for UI interactable.
-            var n = plugin.Sync?.GuestUndoAvailable ?? 0;
-            if (n > __result)
-                __result = n;
+            // Guest local stack is always empty; Host-stamped depth is the sole UI source of truth.
+            __result = plugin.Sync?.GuestUndoAvailable ?? 0;
         }
     }
 

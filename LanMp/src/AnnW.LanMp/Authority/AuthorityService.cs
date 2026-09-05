@@ -490,11 +490,23 @@ namespace AnnW.LanMp.Authority
         private void OnPlayerTurnStarted(Player player, int turn)
         {
             ApplyLocalViewBinding("turn-start");
+            // Host+Guest: entering a foreign/AI seat must drop local MOVE_SELECT threat overlays
+            // (INV-VIEW spectate). Otherwise hover shows own attack range instead of enemy threat.
+            if (player != null && (player.is_ai || !IsLocalPlayersTurn(player.index)))
+            {
+                AnnW.LanMp.Presentation.RemoteTurnPresentation.ClearSpectateUxOverlays(
+                    "turn-start-spectate", _log);
+            }
         }
 
         private void OnPlayerTurnEnded(Player player, int turn)
         {
             ApplyLocalViewBinding("turn-end");
+            if (player != null && IsLocalPlayersTurn(player.index) && !player.is_ai)
+            {
+                AnnW.LanMp.Presentation.RemoteTurnPresentation.ClearSpectateUxOverlays(
+                    "local-turn-end", _log);
+            }
         }
 
         private void OnLobbyStart(LobbyStartPayload payload)

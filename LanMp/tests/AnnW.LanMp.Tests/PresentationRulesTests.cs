@@ -39,6 +39,15 @@ namespace AnnW.LanMp.Tests
         }
 
         [Theory]
+        [InlineData(0f, false)]
+        [InlineData(1f, true)]
+        [InlineData(0.3f, true)]
+        public void ShouldPresentAttachOnlyDoAction_cases(float moveDuration, bool expected)
+        {
+            Assert.Equal(expected, PresentationRules.ShouldPresentAttachOnlyDoAction(moveDuration));
+        }
+
+        [Theory]
         [InlineData(0f, 0.5f, 0.2f, 0f)]
         [InlineData(0.4f, 0.5f, 0.2f, 0.4f)]
         [InlineData(0f, 0f, 0.2f, 0f)]
@@ -105,6 +114,15 @@ namespace AnnW.LanMp.Tests
         }
 
         [Theory]
+        [InlineData(0, false)]
+        [InlineData(1, true)]
+        [InlineData(3, true)]
+        public void CanAcceptUndo_cases(int depth, bool expected)
+        {
+            Assert.Equal(expected, IntentValidateRules.CanAcceptUndo(depth));
+        }
+
+        [Theory]
         [InlineData(false, true, true, 2, 1, true, false, true)]
         [InlineData(true, true, true, 1, 1, true, false, true)]
         [InlineData(true, true, true, 2, 1, true, true, true)]
@@ -116,6 +134,47 @@ namespace AnnW.LanMp.Tests
         {
             Assert.Equal(expected, PresentationRules.ShouldFollowUnitCamera(
                 inLan, armed, playPhase, owner, local, hasLocal, visible));
+        }
+
+        [Theory]
+        [InlineData(false, true, true, 1, 1, false)]
+        [InlineData(true, true, true, 1, 1, true)]
+        [InlineData(true, true, true, 2, 1, false)]
+        [InlineData(true, true, false, 1, 1, false)]
+        public void UseLocalViewerFowForMoveZone_cases(
+            bool inLan, bool armed, bool hasLocal, int unitFrac, int localFrac, bool expected)
+        {
+            Assert.Equal(expected, PresentationRules.UseLocalViewerFowForMoveZone(
+                inLan, armed, hasLocal, unitFrac, localFrac));
+        }
+
+        [Theory]
+        // solo AI processing → suppress
+        [InlineData(false, false, false, false, true, true)]
+        // solo Human → allow
+        [InlineData(false, false, false, false, false, false)]
+        // LAN AI processing → still allow hover threat
+        [InlineData(true, true, false, false, true, false)]
+        // LAN script → suppress
+        [InlineData(true, true, true, false, false, true)]
+        [InlineData(true, true, false, true, false, true)]
+        public void ShouldSuppressHoverThreatOverlay_cases(
+            bool inLan, bool armed, bool script, bool autoGuide, bool ai, bool expected)
+        {
+            Assert.Equal(expected, PresentationRules.ShouldSuppressHoverThreatOverlay(
+                inLan, armed, script, autoGuide, ai));
+        }
+
+        [Theory]
+        [InlineData(false, false, false, false, true, true)]
+        [InlineData(false, false, false, false, false, false)]
+        [InlineData(true, true, false, false, false, true)]
+        [InlineData(true, true, true, false, true, false)]
+        public void ShouldRenderHoverThreatOverlay_cases(
+            bool inLan, bool armed, bool script, bool autoGuide, bool human, bool expected)
+        {
+            Assert.Equal(expected, PresentationRules.ShouldRenderHoverThreatOverlay(
+                inLan, armed, script, autoGuide, human));
         }
     }
 }

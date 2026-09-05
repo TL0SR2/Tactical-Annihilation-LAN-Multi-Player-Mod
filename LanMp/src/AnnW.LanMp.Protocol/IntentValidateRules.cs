@@ -80,5 +80,9 @@ namespace AnnW.LanMp.Protocol
                 return actioned;
             return false;
         }
+
+        /// <summary>Host must have an undo batch before Accepting Undo Intent.</summary>
+        public static bool CanAcceptUndo(int hostUndoStackDepth) =>
+            hostUndoStackDepth > 0;
     }
 }

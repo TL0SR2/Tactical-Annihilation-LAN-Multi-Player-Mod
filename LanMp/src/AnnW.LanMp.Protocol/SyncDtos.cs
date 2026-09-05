@@ -109,6 +109,14 @@ namespace AnnW.LanMp.Protocol
         public int powerIncome;
     }
 
+    /// <summary>Tile wreck metal puddle (Host Die → CreateWreck; Guest must not re-roll Random).</summary>
+    public class WreckSnapDto
+    {
+        public int x;
+        public int y;
+        public int amount;
+    }
+
     /// <summary>Optional Host→Guest UX hint stamped on Commands (not authoritative sim).</summary>
     public static class CommandPresentationHints
     {
@@ -122,6 +130,11 @@ namespace AnnW.LanMp.Protocol
         public int coIndex;
         public UnitSnapDto[] units;
         public PlayerSnapDto[] players;
+        /// <summary>
+        /// Authoritative non-zero wreck tiles. Null = legacy omit (do not touch Guest wrecks).
+        /// Empty array = clear all wrecks on Guest.
+        /// </summary>
+        public WreckSnapDto[] wrecks;
     }
 
     public class SnapshotRequestDto
@@ -166,7 +179,14 @@ namespace AnnW.LanMp.Protocol
 
         public static bool HasPayload(ResultAttachmentDto dto)
         {
-            return dto != null && ((dto.units != null && dto.units.Length > 0) || (dto.players != null && dto.players.Length > 0));
+            if (dto == null)
+                return false;
+            if (dto.units != null && dto.units.Length > 0)
+                return true;
+            if (dto.players != null && dto.players.Length > 0)
+                return true;
+            // Explicit wrecks field (incl. empty = clear-all) is payload for ADR-003 wreck sync.
+            return dto.wrecks != null;
         }
     }
 }
