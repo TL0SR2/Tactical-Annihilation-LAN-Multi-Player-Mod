@@ -31,6 +31,8 @@ namespace AnnW.LanMp.Patches
         {
             if (!LanArmed(out var plugin))
                 return false;
+            if (plugin.Authority.IsLocalHumanDefeated())
+                return true;
             var battle = GS_Battle.self;
             if (battle?.cur_player == null)
                 return false;
@@ -352,6 +354,21 @@ namespace AnnW.LanMp.Patches
             if (plugin.Authority.ShouldBlockLocalInput(battle.cur_player.index))
                 return false;
 
+            // Guest button uses Host-stamped depth; block click-spam when nothing to undo.
+            if (plugin.Net.Role == PeerRole.Guest &&
+                (plugin.Sync == null || plugin.Sync.GuestUndoAvailable <= 0))
+                return false;
+
+            // Host: empty stack → silent no-op (do not Accept→Nack→toast Guest while they spectate).
+            if (plugin.Net.Role == PeerRole.Host)
+            {
+                var n = 0;
+                try { n = battle.undo_move != null ? battle.undo_move.GetUndoMoveCount() : 0; }
+                catch { n = 0; }
+                if (n <= 0)
+                    return false;
+            }
+
             plugin.Sync.SubmitIntent(plugin.Sync.BuildIntent("Undo"), guestOptimisticApply: false);
             return false;
         }
@@ -577,19 +594,24 @@ namespace AnnW.LanMp.Patches
             var plugin = LanMpPlugin.Instance;
             if (plugin == null || !plugin.Enabled.Value)
                 return true;
-            if (SyncContext.SuppressNetworkEmit || SyncContext.ApplyingRemoteCommand)
-                return true;
             if (!plugin.Authority.InLanBattle)
                 return true;
 
+            // Guest never runs vanilla EndGame — wait for Host MatchEnd payload.
             if (plugin.Net.Role == PeerRole.Guest)
             {
                 LanMpPlugin.Log?.LogInfo("[Gate] Blocked Guest EndGame (wait MatchEnd)");
                 return false;
             }
 
-            if (plugin.Net.Role == PeerRole.Host && plugin.Net.IsConnected)
+            if (plugin.Net.Role == PeerRole.Host)
+            {
+                // Win often fires inside HostAcceptIntent while SuppressNetworkEmit is set.
+                // Must still broadcast MatchEnd — do NOT early-return on Suppress/ApplyingRemote.
                 plugin.Authority.BroadcastMatchEnd(victory, "EndGame");
+                return false;
+            }
+
             return true;
         }
     }

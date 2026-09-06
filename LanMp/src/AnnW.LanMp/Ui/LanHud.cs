@@ -34,7 +34,9 @@ namespace AnnW.LanMp.Ui
             if (net.Role == PeerRole.None)
                 roleTxt = "idle";
             else if (net.Role == PeerRole.Host)
-                roleTxt = net.IsConnected ? "HOST+guest" : "HOST listening";
+                roleTxt = net.ConnectedPeerCount > 0
+                    ? ("HOST+" + net.ConnectedPeerCount + "g")
+                    : "HOST listening";
             else
                 roleTxt = "GUEST";
 

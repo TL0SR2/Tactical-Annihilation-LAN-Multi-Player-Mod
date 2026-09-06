@@ -124,7 +124,10 @@ namespace AnnW.LanMp.Checksum
                         .Append(u.hpCur.ToString("0.###", CultureInfo.InvariantCulture)).Append(',')
                         .Append(u.dead ? 1 : 0).Append(',')
                         .Append(u.actioned ? 1 : 0).Append(',').Append(u.moved ? 1 : 0).Append(',')
-                        .Append(u.building ? 1 : 0).Append(',').Append(u.buildingProgress)
+                        .Append(u.building ? 1 : 0).Append(',').Append(u.buildingProgress).Append(',')
+                        .Append(u.cd).Append(',').Append(u.cding ? 1 : 0).Append(',')
+                        .Append(u.factoryBpLeft).Append(',')
+                        .Append(u.shdPercent.ToString("0.###", CultureInfo.InvariantCulture))
                         .Append(';');
                 }
             }
@@ -296,7 +299,7 @@ namespace AnnW.LanMp.Checksum
                 playerIndex = playerIndex,
                 hash = hash
             };
-            _net.Send(new Envelope
+            _net.TryBroadcast(new Envelope
             {
                 Type = MsgType.StateHash,
                 BattleId = p.battleId,
@@ -424,17 +427,30 @@ namespace AnnW.LanMp.Checksum
                 attachment = attach
             };
 
-            _net.Send(new Envelope
+            var snapEnv = new Envelope
             {
                 Type = MsgType.StateSnapshot,
                 BattleId = snap.battleId,
                 PayloadJson = JsonUtil.ToJson(snap)
-            });
+            };
+            // Never broadcast snapshot — would force-apply repair onto healthy guests.
+            if (string.IsNullOrEmpty(env.SourcePeerId) || !_net.TrySendTo(env.SourcePeerId, snapEnv))
+            {
+                _log.LogWarning("[Checksum] StateSnapshot directed send failed peer=" + (env.SourcePeerId ?? ""));
+                return;
+            }
             _log.LogInfo($"[Checksum] Sent StateSnapshot turn={snap.turn} hash={hash} units={attach?.units?.Length ?? 0}");
         }
 
         private void HandleStateSnapshot(Envelope env)
         {
+            // Only the Guest that requested repair should apply — ignore unsolicited snapshots.
+            if (!_repairInFlight)
+            {
+                _log.LogInfo("[Checksum] Ignoring unsolicited StateSnapshot");
+                return;
+            }
+
             var snap = JsonUtil.FromJson<StateSnapshotDto>(env.PayloadJson);
             if (snap == null)
             {

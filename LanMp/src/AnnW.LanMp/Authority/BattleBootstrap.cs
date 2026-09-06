@@ -27,6 +27,18 @@ namespace AnnW.LanMp.Authority
 
                 SS_ANNW_Game.start_game_setting = sgs;
                 log.LogInfo($"[Bootstrap] start_game_setting ready map={sgs.filename} players={sgs.players?.Count} seed={payload.battleSeed} battleId={payload.battleId}");
+                if (sgs.players != null)
+                {
+                    for (var i = 0; i < sgs.players.Count; i++)
+                    {
+                        var p = sgs.players[i];
+                        if (p == null || !p.exist)
+                            continue;
+                        log.LogInfo(
+                            $"[Bootstrap] SGS[{i}] ctrl={p.controller} res_percent={p.res_percent:0.###} " +
+                            $"ai_intel={p.ai_interlligence:0.###} role={net?.Role}");
+                    }
+                }
                 return true;
             }
             catch (Exception ex)
@@ -56,18 +68,18 @@ namespace AnnW.LanMp.Authority
                 return null;
             }
 
-            // 1) Resources TextAsset (e.g. Skirmish/SK_A/MapName)
+            // 1) Resources TextAsset (e.g. Skirmish/MapName — game update dropped pack folder)
             var ta = Resources.Load<TextAsset>(mapKey);
             if (ta == null && !mapKey.StartsWith("Skirmish/", StringComparison.OrdinalIgnoreCase))
             {
-                // Try resolve via SD_ANNW_SK_MAP name ??Skirmish/{pack}/{name}
+                // Try resolve via SD_ANNW_SK_MAP name → Skirmish/{name}
                 try
                 {
                     var sd = SDBase<SD_ANNW_SK_MAP>.Get(mapKey);
                     if (sd != null)
                     {
-                        var pack = sd.pack != null ? sd.pack.name : "Unknown";
-                        var path = "Skirmish/" + pack + "/" + sd.name;
+                        // Game update: built-in path is Skirmish/{sd.name} (pack field removed).
+                        var path = "Skirmish/" + sd.name;
                         ta = Resources.Load<TextAsset>(path);
                         if (ta != null)
                             mapKey = path;
@@ -98,7 +110,7 @@ namespace AnnW.LanMp.Authority
             else
             {
                 log.LogError("[Bootstrap] Map not found as Resources or file: " + mapKey);
-                log.LogError("[Bootstrap] Tip: use SD map name or Resources path like Skirmish/<pack>/<name>");
+                log.LogError("[Bootstrap] Tip: use SD map name or Resources path like Skirmish/<name>");
                 return null;
             }
 
@@ -152,23 +164,39 @@ namespace AnnW.LanMp.Authority
                         p.sd_co = "";
                     try
                     {
-                        if (st == LobbySeatState.HumanSeated)
-                            p.controller = PlayerControl.Human;
-                        else
-                            p.controller = (PlayerControl)seat.controller;
+                        var human = st == LobbySeatState.HumanSeated;
+                        var stamp = SkirmishSeatEconomy.ResolveForStart(seat, human);
+                        p.controller = (PlayerControl)stamp.controller;
+                        p.res_percent = stamp.resPercent;
+                        p.ai_interlligence = stamp.aiIntelligence;
+                        log?.LogInfo(
+                            $"[Bootstrap] seat[{i}] st={st} ctrl={stamp.controller} " +
+                            $"res={stamp.resPercent:0.###} intel={stamp.aiIntelligence:0.###} " +
+                            $"(draft ctrl={seat.controller} res={seat.resPercent:0.###} intel={seat.aiIntelligence:0.###})");
                     }
-                    catch
+                    catch (Exception ex)
                     {
-                        p.controller = PlayerControl.AI_Normal;
+                        log?.LogWarning("[Bootstrap] seat economy stamp failed: " + ex.Message);
+                        p.controller = st == LobbySeatState.HumanSeated
+                            ? PlayerControl.Human
+                            : PlayerControl.AI_Normal;
+                        p.res_percent = SkirmishSeatEconomy.DefaultResPercent;
+                        p.ai_interlligence = st == LobbySeatState.HumanSeated
+                            ? 0f
+                            : SkirmishSeatEconomy.DefaultAiIntelligence;
                     }
                 }
                 else if (i == draft.hostSlotIndex || (draft.guestSlotIndex >= 0 && i == draft.guestSlotIndex))
                 {
                     p.controller = PlayerControl.Human;
+                    p.res_percent = SkirmishSeatEconomy.DefaultResPercent;
+                    p.ai_interlligence = 0f;
                 }
                 else
                 {
                     p.controller = PlayerControl.AI_Normal;
+                    p.res_percent = SkirmishSeatEconomy.GetPresetResMul(3);
+                    p.ai_interlligence = SkirmishSeatEconomy.GetPresetAiIntelligence(3);
                 }
 
                 sgs.players.Add(p);

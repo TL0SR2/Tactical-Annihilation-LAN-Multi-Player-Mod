@@ -30,8 +30,7 @@ namespace AnnW.LanMp.Ui
                     var sd = kv.Value;
                     if (sd == null || sd.hide)
                         continue;
-                    var pack = sd.pack != null ? sd.pack.name : "Unknown";
-                    var path = "Skirmish/" + pack + "/" + sd.name;
+                    var path = "Skirmish/" + sd.name;
                     var display = ResolveLevelName(sd.name);
                     var playerNum = TryReadPlayerNum(path);
                     list.Add(new Entry
@@ -72,8 +71,8 @@ namespace AnnW.LanMp.Ui
                     var sd = SDBase<SD_ANNW_SK_MAP>.Get(entry.Id);
                     if (sd != null)
                     {
-                        var pack = sd.pack != null ? sd.pack.name : "Unknown";
-                        var path = "Skirmish/" + pack + "/" + sd.name;
+                        // Game update: built-in path is Skirmish/{sd.name} (pack field removed).
+                        var path = "Skirmish/" + sd.name;
                         ta = Resources.Load<TextAsset>(path);
                         if (ta != null)
                             mapKey = path;

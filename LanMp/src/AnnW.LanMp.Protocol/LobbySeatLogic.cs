@@ -7,8 +7,8 @@ namespace AnnW.LanMp.Protocol
     public static class LobbySeatLogic
     {
         public const int ColorCount = 8;
-        /// <summary>PlayerControl.AI_Normal typical cast; callers may override.</summary>
-        public const int DefaultAiController = 2;
+        /// <summary>PlayerControl.AI_Normal — LAN draft/standby default (vanilla solo UI often starts at AI_Easy=2).</summary>
+        public const int DefaultAiController = 3;
 
         public static LobbySeatState GetState(LobbySeatDto seat)
         {
@@ -79,7 +79,7 @@ namespace AnnW.LanMp.Protocol
 
         public static LobbySeatDto MakeAiSeat(int pos, int team, int color, string coId, int aiController)
         {
-            return new LobbySeatDto
+            var seat = new LobbySeatDto
             {
                 exist = true,
                 state = (int)LobbySeatState.Ai,
@@ -93,6 +93,11 @@ namespace AnnW.LanMp.Protocol
                 coId = coId ?? "",
                 occupantName = ""
             };
+            if (SkirmishSeatEconomy.IsPresetAiController(aiController))
+                SkirmishSeatEconomy.ApplyPresetToSeat(seat, aiController);
+            else
+                SkirmishSeatEconomy.EnsureDefaults(seat);
+            return seat;
         }
 
         public static LobbySeatDto MakeHostSeat(string peerId, string name, int pos, int team, int color, string coId)
@@ -109,7 +114,9 @@ namespace AnnW.LanMp.Protocol
                 posMode = (int)LobbyPosMode.Fixed,
                 pos = pos,
                 coId = coId ?? "",
-                occupantName = name ?? ""
+                occupantName = name ?? "",
+                resPercent = SkirmishSeatEconomy.DefaultResPercent,
+                aiIntelligence = 0f
             };
         }
 
@@ -194,9 +201,7 @@ namespace AnnW.LanMp.Protocol
             seat.peerId = peerId;
             seat.occupantName = displayName ?? "";
             seat.controller = 0; // Human
-            draft.guestPeerId = peerId;
-            draft.guestDisplayName = displayName ?? "";
-            draft.guestSlotIndex = seatIndex;
+            RefreshLegacyGuestFields(draft);
             return true;
         }
 
@@ -212,13 +217,41 @@ namespace AnnW.LanMp.Protocol
             seat.occupantName = "";
             seat.controller = ai;
             seat.standbyController = ai;
-            if (draft.guestPeerId == peerId)
-            {
-                draft.guestPeerId = "";
-                draft.guestDisplayName = "";
-                draft.guestSlotIndex = -1;
-            }
+            RefreshLegacyGuestFields(draft);
             return true;
+        }
+
+        /// <summary>
+        /// Legacy draft.guestPeerId / guestSlotIndex = first non-host HumanSeated (compat UI).
+        /// </summary>
+        public static void RefreshLegacyGuestFields(LobbyDraftDto draft)
+        {
+            if (draft?.seats == null)
+            {
+                if (draft != null)
+                {
+                    draft.guestPeerId = "";
+                    draft.guestDisplayName = "";
+                    draft.guestSlotIndex = -1;
+                }
+                return;
+            }
+            var host = draft.hostPeerId ?? "";
+            for (var i = 0; i < draft.seats.Length; i++)
+            {
+                var s = draft.seats[i];
+                if (s == null || GetState(s) != LobbySeatState.HumanSeated)
+                    continue;
+                if (string.IsNullOrEmpty(s.peerId) || s.peerId == host)
+                    continue;
+                draft.guestPeerId = s.peerId;
+                draft.guestDisplayName = s.occupantName ?? "";
+                draft.guestSlotIndex = i;
+                return;
+            }
+            draft.guestPeerId = "";
+            draft.guestDisplayName = "";
+            draft.guestSlotIndex = -1;
         }
 
         public static bool IsColorTaken(LobbyDraftDto draft, int color, int exceptSeatIndex)
@@ -387,8 +420,68 @@ namespace AnnW.LanMp.Protocol
                     message = "ai only";
                     return false;
                 }
+                if (req.controller > SkirmishSeatEconomy.ControllerCustom)
+                {
+                    nack = SeatEditNackCode.NotAllowed;
+                    message = "bad controller";
+                    return false;
+                }
                 seat.controller = req.controller;
                 seat.standbyController = req.controller;
+                if (SkirmishSeatEconomy.IsPresetAiController(req.controller))
+                    SkirmishSeatEconomy.ApplyPresetToSeat(seat, req.controller);
+                else if (SkirmishSeatEconomy.IsCustomController(req.controller))
+                    SkirmishSeatEconomy.EnsureDefaults(seat);
+            }
+
+            // Economy + custom AI intel: Host-only for every seat (including seated humans).
+            if (req.setResPercent)
+            {
+                if (!asHost)
+                {
+                    nack = SeatEditNackCode.NotAllowed;
+                    message = "resPercent host-only";
+                    return false;
+                }
+                seat.resPercent = req.resPercent > 0f
+                    ? req.resPercent
+                    : SkirmishSeatEconomy.DefaultResPercent;
+                // Editing eco on a preset AI slot promotes to Custom so SetupForSkirmish applies SGS values.
+                if (st == LobbySeatState.Ai || st == LobbySeatState.HumanStandby)
+                {
+                    if (SkirmishSeatEconomy.IsPresetAiController(seat.controller))
+                    {
+                        seat.controller = SkirmishSeatEconomy.ControllerCustom;
+                        seat.standbyController = SkirmishSeatEconomy.ControllerCustom;
+                        if (seat.aiIntelligence <= 0f)
+                            seat.aiIntelligence = SkirmishSeatEconomy.DefaultAiIntelligence;
+                    }
+                }
+            }
+
+            if (req.setAiIntelligence)
+            {
+                if (!asHost)
+                {
+                    nack = SeatEditNackCode.NotAllowed;
+                    message = "aiIntelligence host-only";
+                    return false;
+                }
+                if (st != LobbySeatState.Ai && st != LobbySeatState.HumanStandby)
+                {
+                    nack = SeatEditNackCode.NotAllowed;
+                    message = "aiIntelligence ai-only";
+                    return false;
+                }
+                seat.aiIntelligence = req.aiIntelligence > 0f
+                    ? req.aiIntelligence
+                    : SkirmishSeatEconomy.DefaultAiIntelligence;
+                if (SkirmishSeatEconomy.IsPresetAiController(seat.controller) ||
+                    seat.controller <= 0)
+                {
+                    seat.controller = SkirmishSeatEconomy.ControllerCustom;
+                    seat.standbyController = SkirmishSeatEconomy.ControllerCustom;
+                }
             }
 
             if (req.setTeam)
@@ -529,7 +622,8 @@ namespace AnnW.LanMp.Protocol
                 case LobbyRejectCode.NoHumanSlot:
                     return "房主尚未开放人类位（请等待房主将槽位切为「人类位·暂 AI」）";
                 case LobbyRejectCode.GuestSlotTaken:
-                    return "当前版本仅支持再进入 1 名真人，房间已有客机";
+                    // Legacy Phase A code; Phase B paths use NoHumanSlot / RoomFull.
+                    return "房间人类位已满";
                 default:
                     return "无法加入房间";
             }

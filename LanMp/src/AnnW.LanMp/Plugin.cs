@@ -2,6 +2,7 @@ using System;
 using AnnW.LanMp.Authority;
 using AnnW.LanMp.Checksum;
 using AnnW.LanMp.Core;
+using AnnW.LanMp.Patches;
 using AnnW.LanMp.Protocol;
 using AnnW.LanMp.Sync;
 using AnnW.LanMp.Ui;
@@ -21,7 +22,7 @@ namespace AnnW.LanMp
     {
         public const string PluginGuid = "annw.lanmp";
         public const string PluginName = "AnnW LAN Multiplayer";
-        public const string PluginVersion = "0.16.12";
+        public const string PluginVersion = "0.18.2";
 
         internal static LanMpPlugin Instance { get; private set; }
         internal static ManualLogSource Log { get; private set; }
@@ -142,6 +143,9 @@ namespace AnnW.LanMp
                     return;
                 if (n.code == "already-moved" || n.code == "already-actioned")
                     return;
+                // Spectating Host Undo empties: Host-local reject must never toast Guest (INV-VIEW).
+                if (n.code == "nothing-to-undo" && GateUtil.IsSpectating())
+                    return;
                 UiFeedback.Push(n.message);
             };
 
@@ -192,6 +196,9 @@ namespace AnnW.LanMp
                 Log.LogError("Harmony patch sweep failed: " + ex);
             }
 
+            try { GameCompatProbe.Run(Log); }
+            catch (Exception ex) { Log.LogWarning("[Compat] " + ex.Message); }
+
             SceneManager.sceneLoaded += OnSceneLoaded;
             try { LanLocalization.EnsureRegistered(); } catch (Exception ex) { Log.LogWarning("[UI] LAN register early: " + ex.Message); }
             Log.LogInfo($"{PluginName} {PluginVersion} loaded. Injector IMGUI disabled.");
@@ -240,8 +247,14 @@ namespace AnnW.LanMp
 
         private void OnGUI()
         {
+            if (!Enabled.Value)
+                return;
+
+            // Settlement must show even when debug IMGUI is off (native floater + this modal).
+            MatchSettlementUi.Draw();
+
             // Injector IMGUI thoroughly disabled. Lobby is native game popup only.
-            if (!Enabled.Value || EnableDebugImgui == null || !EnableDebugImgui.Value)
+            if (EnableDebugImgui == null || !EnableDebugImgui.Value)
                 return;
             LanHud.Draw(this);
             if (ShowOverlay.Value)
@@ -282,14 +295,16 @@ namespace AnnW.LanMp
             if (!Authority.InLanBattle && !Net.IsConnected)
                 return;
 
-            if (Authority.InLanBattle)
+            if (Authority.InLanBattle && !Authority.MatchSettled)
             {
-                var host = Net.Role == PeerRole.Host;
-                Authority.AbortMatch(
-                    host ? "host-left" : "guest-left",
-                    reason,
-                    broadcast: host,
-                    loadMenu: false);
+                Authority.NotifyLeavingBattle(reason);
+                // Host AbortMatch does not Disconnect; Guest NotifyLeavingBattle already does.
+                if (Net.Role == PeerRole.Host && (Net.IsConnected || Net.Role != PeerRole.None))
+                {
+                    try { Net.Disconnect(reason); }
+                    catch { /* ignore */ }
+                }
+                return;
             }
 
             if (Net.IsConnected || Net.Role != PeerRole.None)

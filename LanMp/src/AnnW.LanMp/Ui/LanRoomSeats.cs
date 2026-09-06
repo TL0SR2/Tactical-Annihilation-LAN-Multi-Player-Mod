@@ -10,16 +10,19 @@ namespace AnnW.LanMp.Ui
 {
     /// <summary>
     /// Seat table using vanilla-sized dropdown clones when available.
-    /// Columns: 类型 | 指挥官 | 难度 | 队伍 | 颜色 | 位置
+    /// Columns: 类型 | 指挥官 | 难度 | 经济 | AI智 | 队伍 | 颜色 | 位置
+    /// Eco + custom AI intel are Host-authoritative (game skirmish update).
     /// </summary>
     internal static class LanRoomSeats
     {
-        private const float ColKind = 1.55f;
-        private const float ColCo = 1.45f;
-        private const float ColDiff = 1.15f;
-        private const float ColTeam = 0.95f;
-        private const float ColColor = 0.95f;
-        private const float ColPos = 1.05f;
+        private const float ColKind = 1.35f;
+        private const float ColCo = 1.25f;
+        private const float ColDiff = 1.05f;
+        private const float ColEco = 0.85f;
+        private const float ColIntel = 0.85f;
+        private const float ColTeam = 0.85f;
+        private const float ColColor = 0.85f;
+        private const float ColPos = 0.95f;
         private const int PosRandomId = -1;
 
         public static void Rebuild(
@@ -125,8 +128,55 @@ namespace AnnW.LanMp.Ui
                         LanSeatCell.AddStatic(row, "Diff", ColDiff, "—");
                     }
 
+                    // Economy multiplier — Host only (all seats).
+                    {
+                        var ecoOpts = BuildResMulOptions();
+                        var resTable = GameCompatProbe.ResMulOptionsLive();
+                        var ecoId = GameCompatProbe.IndexOfNearest(
+                            resTable,
+                            seat.resPercent > 0f ? seat.resPercent : SkirmishSeatEconomy.DefaultResPercent);
+                        LanSeatCell.AddDropdown(row, "Eco", ColEco, ecoOpts, ecoId, id =>
+                        {
+                            LanMpPlugin.Instance?.Lobby.RequestSeatEdit(new SeatEditRequest
+                            {
+                                seatIndex = idx,
+                                setResPercent = true,
+                                resPercent = GameCompatProbe.ValueAt(
+                                    resTable, id, SkirmishSeatEconomy.DefaultResPercent)
+                            });
+                            onChanged?.Invoke();
+                        }, isHost);
+                    }
+
+                    // Custom AI intelligence — Host only; AI / standby seats.
+                    if (st == LobbySeatState.Ai || st == LobbySeatState.HumanStandby)
+                    {
+                        var intelOpts = BuildAiIntelOptions();
+                        var intelTable = GameCompatProbe.AiIntelOptionsLive();
+                        var intelVal = seat.aiIntelligence > 0f
+                            ? seat.aiIntelligence
+                            : SkirmishSeatEconomy.DefaultAiIntelligence;
+                        var intelId = GameCompatProbe.IndexOfNearest(intelTable, intelVal);
+                        LanSeatCell.AddDropdown(row, "Intel", ColIntel, intelOpts, intelId, id =>
+                        {
+                            LanMpPlugin.Instance?.Lobby.RequestSeatEdit(new SeatEditRequest
+                            {
+                                seatIndex = idx,
+                                setAiIntelligence = true,
+                                aiIntelligence = GameCompatProbe.ValueAt(
+                                    intelTable, id, SkirmishSeatEconomy.DefaultAiIntelligence)
+                            });
+                            onChanged?.Invoke();
+                        }, isHost);
+                    }
+                    else
+                    {
+                        LanSeatCell.AddStatic(row, "Intel", ColIntel, "—");
+                    }
+
                     var teamOpts = new List<LanDropMenu.Option>();
-                    for (var t = 0; t < 6; t++)
+                    // Fraction.TEAM1..TEAM8 (0..7); NEUTRAL/NONE are not skirmish seat teams.
+                    for (var t = 0; t < 8; t++)
                         teamOpts.Add(new LanDropMenu.Option(TeamLabel(t), t));
                     LanSeatCell.AddDropdown(row, "Team", ColTeam, teamOpts, seat.team, id =>
                     {
@@ -222,6 +272,39 @@ namespace AnnW.LanMp.Ui
             return list;
         }
 
+        private static List<LanDropMenu.Option> BuildResMulOptions()
+        {
+            var list = new List<LanDropMenu.Option>();
+            var opts = GameCompatProbe.ResMulOptionsLive();
+            for (var i = 0; i < opts.Length; i++)
+            {
+                var v = opts[i];
+                list.Add(new LanDropMenu.Option(FormatMul(v), i));
+            }
+            return list;
+        }
+
+        private static List<LanDropMenu.Option> BuildAiIntelOptions()
+        {
+            var list = new List<LanDropMenu.Option>();
+            var opts = GameCompatProbe.AiIntelOptionsLive();
+            for (var i = 0; i < opts.Length; i++)
+            {
+                var v = opts[i];
+                list.Add(new LanDropMenu.Option(FormatMul(v), i));
+            }
+            return list;
+        }
+
+        private static string FormatMul(float v)
+        {
+            if (Math.Abs(v - 1f) < 0.001f)
+                return "×1";
+            if (Math.Abs(v * 10f - Math.Round(v * 10f)) < 0.001f)
+                return "×" + v.ToString("0.#");
+            return "×" + v.ToString("0.##");
+        }
+
         private static void BuildHeader(RectTransform listRoot)
         {
             var row = CreateRow(listRoot, "Header", 28f);
@@ -231,9 +314,11 @@ namespace AnnW.LanMp.Ui
             LanSeatCell.AddStatic(row, "H0", ColKind, "类型");
             LanSeatCell.AddStatic(row, "H1", ColCo, "指挥官");
             LanSeatCell.AddStatic(row, "H2", ColDiff, "难度");
-            LanSeatCell.AddStatic(row, "H3", ColTeam, "队伍");
-            LanSeatCell.AddStatic(row, "H4", ColColor, "颜色");
-            LanSeatCell.AddStatic(row, "H5", ColPos, "位置");
+            LanSeatCell.AddStatic(row, "H3", ColEco, "经济");
+            LanSeatCell.AddStatic(row, "H4", ColIntel, "AI智");
+            LanSeatCell.AddStatic(row, "H5", ColTeam, "队伍");
+            LanSeatCell.AddStatic(row, "H6", ColColor, "颜色");
+            LanSeatCell.AddStatic(row, "H7", ColPos, "位置");
         }
 
         private static RectTransform CreateRow(RectTransform parent, string name, float rowH)
@@ -347,7 +432,10 @@ namespace AnnW.LanMp.Ui
         {
             try
             {
-                var name = ((PlayerControl)controller).ToString();
+                // PlayerControl.Custom localizes under PlayerName.AI_Custom (game update).
+                var name = controller == (int)PlayerControl.Custom
+                    ? "AI_Custom"
+                    : ((PlayerControl)controller).ToString();
                 var t = LAN.Get("PlayerName", name);
                 return string.IsNullOrEmpty(t) ? name : t;
             }

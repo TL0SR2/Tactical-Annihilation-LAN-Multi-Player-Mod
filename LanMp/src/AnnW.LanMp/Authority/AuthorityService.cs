@@ -26,26 +26,6 @@ namespace AnnW.LanMp.Authority
         public SlotKind Kind;
     }
 
-    [Serializable]
-    public class SeatMatchResultDto
-    {
-        public int playerIndex;
-        public bool defeated;
-        public bool winner;
-        public int fraction;
-    }
-
-    [Serializable]
-    public class MatchEndPayload
-    {
-        public bool victory;
-        public bool victoryFlag;
-        public string reason;
-        public string battleId;
-        public int winnerFraction = -1;
-        public SeatMatchResultDto[] results;
-    }
-
     /// <summary>M03: slot map, input gate, sole battle start gate, LocalHuman view binding.</summary>
     public sealed class AuthorityService : ILanMpModule
     {
@@ -60,7 +40,18 @@ namespace AnnW.LanMp.Authority
 
         public bool GatesArmed { get; private set; }
         public bool InLanBattle { get; private set; }
+        /// <summary>True after Host MatchEnd / settlement — scene leave must not AbortMatch peers.</summary>
+        public bool MatchSettled { get; private set; }
+        /// <summary>Last Host MatchEnd payload (Guest/Host may disconnect after; UI reads this).</summary>
+        public MatchEndPayload LastMatchEnd { get; private set; }
+        public bool LastLocalVictory { get; private set; }
         public string PendingBattleId { get; private set; }
+
+        private bool _abortApplied;
+        private bool _openLobbyAfterAbort;
+        private bool _openLobbyAfterSettlement;
+        /// <summary>Host: drop guests one tick after MatchEnd send so payload can land first.</summary>
+        private bool _deferredDropPeersAfterMatchEnd;
 
         public AuthorityService(LobbySession lobby, NetSession net, ManualLogSource log)
         {
@@ -74,31 +65,93 @@ namespace AnnW.LanMp.Authority
             _lobby.OnLobbyStart += OnLobbyStart;
             _net.Subscribe(OnEnvelope);
             _net.OnDisconnected += OnNetDisconnected;
+            _net.OnPeerDisconnected += OnPeerDisconnected;
         }
 
         public void Stop()
         {
             UnhookBattleEvents();
             _net.OnDisconnected -= OnNetDisconnected;
+            _net.OnPeerDisconnected -= OnPeerDisconnected;
             GatesArmed = false;
             InLanBattle = false;
+            MatchSettled = false;
+            LastMatchEnd = null;
+            _openLobbyAfterSettlement = false;
+            _deferredDropPeersAfterMatchEnd = false;
         }
 
         public void Tick(float dt)
         {
+            if (_deferredDropPeersAfterMatchEnd)
+            {
+                _deferredDropPeersAfterMatchEnd = false;
+                try
+                {
+                    if (_net.Role == PeerRole.Host)
+                        _net.DropAllPeersKeepHosting("match-end");
+                    else if (_net.IsConnected)
+                        _net.Disconnect("match-end");
+                }
+                catch (Exception ex)
+                {
+                    _log.LogWarning("[Authority] deferred MatchEnd drop: " + ex.Message);
+                }
+            }
+
             if (_openLobbyAfterAbort)
             {
                 _openLobbyAfterAbort = false;
                 try
                 {
                     if (_net.Role == PeerRole.Host)
+                    {
+                        try { _lobby.ReleaseSeatsForDisconnectedPeers(); }
+                        catch (Exception ex) { _log.LogWarning("[Authority] seat reconcile: " + ex.Message); }
                         LanRoomPanel.Open();
+                    }
                     else
                         LanLobbyNativePanel.Open();
                 }
                 catch (Exception ex)
                 {
                     _log.LogWarning("[Authority] reopen lobby: " + ex.Message);
+                }
+            }
+
+            if (_openLobbyAfterSettlement)
+            {
+                _openLobbyAfterSettlement = false;
+                try
+                {
+                    if (_net.Role == PeerRole.Host)
+                    {
+                        try { _lobby.ReleaseSeatsForDisconnectedPeers(); }
+                        catch (Exception ex) { _log.LogWarning("[Authority] seat reconcile: " + ex.Message); }
+                        LanRoomPanel.Open();
+                    }
+                    else
+                        LanLobbyNativePanel.Open();
+                }
+                catch (Exception ex)
+                {
+                    _log.LogWarning("[Authority] reopen lobby after settlement: " + ex.Message);
+                }
+
+                try
+                {
+                    if (LastMatchEnd != null)
+                    {
+                        MatchSettlementUi.Show(
+                            LastMatchEnd,
+                            LastLocalVictory,
+                            GetLocalHumanSlotIndex(),
+                            _net.LocalPeerId);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _log.LogWarning("[Authority] settlement UI: " + ex.Message);
                 }
             }
 
@@ -120,6 +173,9 @@ namespace AnnW.LanMp.Authority
                 {
                     InLanBattle = true;
                     _abortApplied = false;
+                    MatchSettled = false;
+                    LastMatchEnd = null;
+                    MatchSettlementUi.Hide();
                     ArmGatesFromDraft();
                     ApplyBattleIdOverride();
                     HookBattleEvents();
@@ -129,7 +185,7 @@ namespace AnnW.LanMp.Authority
                     BattleSyncTrace.Ev("BattleEnter", detail: "InLanBattle");
                 }
             }
-            else if (InLanBattle && !_abortApplied)
+            else if (InLanBattle && !_abortApplied && !MatchSettled)
             {
                 // Left battle without AbortMatch (vanilla quit path) — notify peer then clear.
                 _log.LogWarning("[Authority] Left Battle scene while LAN live — aborting");
@@ -141,10 +197,11 @@ namespace AnnW.LanMp.Authority
                     catch { /* ignore */ }
                 }
             }
-            else
+            else if (MatchSettled || _abortApplied)
             {
                 UnhookBattleEvents();
                 InLanBattle = false;
+                GatesArmed = false;
             }
         }
 
@@ -154,6 +211,17 @@ namespace AnnW.LanMp.Authority
             {
                 if (s.Kind == SlotKind.LocalHuman)
                     return s.PosInd;
+            }
+            return null;
+        }
+
+        /// <summary>Peer that owns a draft/battle seat index, or null if AI / unbound.</summary>
+        public string GetOwnerPeerIdForSeat(int seatIndex)
+        {
+            foreach (var s in _slots)
+            {
+                if (s.PosInd == seatIndex)
+                    return s.OwnerPeerId;
             }
             return null;
         }
@@ -203,6 +271,7 @@ namespace AnnW.LanMp.Authority
             if (cur != null)
             {
                 var shouldControl = IsLocalPlayersTurn(cur.index) && !cur.is_ai
+                    && !local.defeated
                     && !AnnW.LanMp.Presentation.PresentationContext.ControlGrantPending;
                 if (battle.is_player_in_control != shouldControl)
                 {
@@ -249,14 +318,27 @@ namespace AnnW.LanMp.Authority
         {
             if (!InLanBattle || !GatesArmed)
                 return true;
+            if (IsLocalHumanDefeated())
+                return false;
             var slot = GetLocalHumanSlotIndex();
             if (!slot.HasValue)
                 return true;
             return InputGateRules.IsLocalPlayersTurn(InLanBattle, GatesArmed, currentPlayerIndex, slot.Value);
         }
 
+        /// <summary>Local human seat is wiped — stay in battle as spectator (INV-VIEW).</summary>
+        public bool IsLocalHumanDefeated()
+        {
+            if (!InLanBattle || !GatesArmed)
+                return false;
+            var p = TryGetLocalHumanPlayer();
+            return p != null && p.defeated;
+        }
+
         public bool ShouldBlockLocalInput(int currentPlayerIndex)
         {
+            if (IsLocalHumanDefeated())
+                return true;
             return InputGateRules.ShouldBlockLocalInput(
                 InLanBattle,
                 GatesArmed,
@@ -266,32 +348,38 @@ namespace AnnW.LanMp.Authority
 
         public void BroadcastMatchEnd(bool victory, string reason)
         {
-            if (_net.Role != PeerRole.Host || !_net.IsConnected)
+            if (_net.Role != PeerRole.Host)
+                return;
+            if (MatchSettled)
                 return;
 
             var results = new System.Collections.Generic.List<SeatMatchResultDto>();
             var battle = GS_Battle.self;
-            var winnerFrac = -1;
             if (battle?.all_player?.players != null)
             {
+                // Per-seat defeated for spectate truth; winner assigned by faction below
+                // (defeated Guest on a winning team still gets MatchEnd victory).
                 foreach (var p in battle.all_player.players)
                 {
                     if (p == null || p.fraction == Fraction.NEUTRAL)
                         continue;
+                    var owner = GetOwnerPeerIdForSeat(p.index);
                     results.Add(new SeatMatchResultDto
                     {
                         playerIndex = p.index,
                         defeated = p.defeated,
-                        winner = !p.defeated && victory,
-                        fraction = (int)p.fraction
+                        winner = false,
+                        fraction = (int)p.fraction,
+                        ownerPeerId = owner ?? ""
                     });
-                    if (!p.defeated && victory)
-                        winnerFrac = (int)p.fraction;
                 }
             }
 
+            var winnerFrac = MatchEndRules.AssignFactionWinners(results);
+
             var pld = new MatchEndPayload
             {
+                // Legacy Host-seat EndGame(bool) only — ResolveLocalVictory ignores this for Guests.
                 victory = victory,
                 victoryFlag = victory,
                 reason = reason ?? "",
@@ -299,16 +387,97 @@ namespace AnnW.LanMp.Authority
                 winnerFraction = winnerFrac,
                 results = results.ToArray()
             };
-            _net.Send(new Envelope
+
+            // Deliver payload while the link still works; peers may disconnect immediately after.
+            if (_net.IsConnected)
             {
-                Type = MsgType.MatchEnd,
-                BattleId = pld.battleId,
-                PayloadJson = JsonUtil.ToJson(pld)
-            });
+                try
+                {
+                    _net.TryBroadcast(new Envelope
+                    {
+                        Type = MsgType.MatchEnd,
+                        BattleId = pld.battleId,
+                        PayloadJson = JsonUtil.ToJson(pld)
+                    });
+                }
+                catch (Exception ex)
+                {
+                    _log.LogWarning("[Authority] MatchEnd broadcast: " + ex.Message);
+                }
+            }
+
             _log.LogInfo(
                 $"[Authority] MatchEnd victory={victory} winnerFrac={winnerFrac} seats={results.Count} reason={reason}");
             BattleSyncTrace.Ev("MatchEnd", detail: "victory=" + victory + " frac=" + winnerFrac + " " + reason);
             BattleSyncTrace.EndBattleSession("MatchEnd");
+            ApplyMatchSettlementLocal(pld, dropPeers: true);
+        }
+
+        /// <summary>Mark LAN battle settled so quit/scene-leave does not AbortMatch remaining peers.</summary>
+        public void NoteMatchSettled()
+        {
+            MatchSettled = true;
+            _log.LogInfo("[Authority] MatchSettled=true (quit will not abort peers)");
+        }
+
+        /// <summary>
+        /// Cache settlement, leave battle scene, optional peer drop — no vanilla in-battle EndGame UI.
+        /// INV: Host-only judge already encoded in <paramref name="end"/> (ADR-001 / ADR-004).
+        /// </summary>
+        private void ApplyMatchSettlementLocal(MatchEndPayload end, bool dropPeers)
+        {
+            if (end == null)
+                return;
+            if (MatchSettled)
+                return;
+
+            // Resolve while GS_Battle / seats still exist — per local seat/fraction, not Host victory bool.
+            LastLocalVictory = ResolveLocalMatchVictory(end);
+            LastMatchEnd = end;
+            NoteMatchSettled();
+
+            _log.LogInfo(
+                $"[Authority] Local settlement victory={LastLocalVictory} role={_net.Role} " +
+                $"(HostFlag={end.victory} winnerFrac={end.winnerFraction})");
+
+            // Immediate feedback — mid-defeat spectate never settles; only MatchEnd reaches here.
+            try
+            {
+                var row = MatchEndRules.FindLocalResult(
+                    end, GetLocalHumanSlotIndex(), _net.LocalPeerId);
+                if (LastLocalVictory && row != null && row.defeated)
+                    UiFeedback.Push("阵营胜利（本席已淘汰·观战至终局）");
+                else if (LastLocalVictory)
+                    UiFeedback.Push("战斗胜利");
+                else
+                    UiFeedback.Push("战斗失败");
+            }
+            catch { /* ignore */ }
+
+            UnhookBattleEvents();
+            InLanBattle = false;
+            GatesArmed = false;
+            PendingBattleId = null;
+            _lobby.ClearBattleAuthorization();
+
+            // Defer TCP drop one tick — MatchEnd bytes must reach Guests first.
+            if (dropPeers)
+                _deferredDropPeersAfterMatchEnd = true;
+
+            try
+            {
+                var scene = SceneManager.GetActiveScene().name ?? "";
+                if (scene.IndexOf("Battle", StringComparison.OrdinalIgnoreCase) >= 0)
+                    SceneManager.LoadScene("ANNW_Menu");
+            }
+            catch (Exception ex)
+            {
+                _log.LogWarning("[Authority] MatchEnd LoadScene: " + ex.Message);
+            }
+
+            _openLobbyAfterSettlement = true;
+            _log.LogInfo(
+                $"[Authority] Match settlement localVictory={LastLocalVictory} — left battle, deferDrop={dropPeers}");
         }
 
         /// <summary>Abort in-battle session (host left / guest left / leave). Ends battle UI and returns to lobby.</summary>
@@ -324,7 +493,7 @@ namespace AnnW.LanMp.Authority
                 };
                 try
                 {
-                    _net.Send(new Envelope
+                    _net.TryBroadcast(new Envelope
                     {
                         Type = MsgType.MatchAbort,
                         BattleId = dto.battleId,
@@ -339,9 +508,6 @@ namespace AnnW.LanMp.Authority
 
             ApplyMatchAbortLocal(reason, detail, loadMenu);
         }
-
-        private bool _abortApplied;
-        private bool _openLobbyAfterAbort;
 
         private void ApplyMatchAbortLocal(string reason, string detail, bool loadMenu = true)
         {
@@ -383,21 +549,22 @@ namespace AnnW.LanMp.Authority
         /// <summary>Call before vanilla DoQuitOut so peer is notified; vanilla still loads menu.</summary>
         public void NotifyLeavingBattle(string reason)
         {
-            if (!InLanBattle && string.IsNullOrEmpty(PendingBattleId))
+            if ((!InLanBattle && string.IsNullOrEmpty(PendingBattleId)) || MatchSettled)
                 return;
 
             var host = _net.Role == PeerRole.Host;
-            AbortMatch(
-                host ? "host-left" : "guest-left",
-                reason ?? "quit-out",
-                broadcast: host,
-                loadMenu: false);
-
-            if (!host)
+            if (host)
             {
-                try { _net.Disconnect(reason ?? "quit-out"); }
-                catch { /* ignore */ }
+                // Host exit ends the match for everyone (sim lives on Host).
+                AbortMatch("host-left", reason ?? "quit-out", broadcast: true, loadMenu: false);
+                return;
             }
+
+            // Guest exit: tear down local session only — Host continues (seat→AI).
+            _log.LogInfo("[Authority] Guest leaving battle — Host keeps match reason=" + (reason ?? ""));
+            ApplyMatchAbortLocal("leave-room", reason ?? "quit-out", loadMenu: false);
+            try { _net.Disconnect(reason ?? "quit-out"); }
+            catch { /* ignore */ }
         }
 
         private static string MapAbortMessage(string reason, string detail)
@@ -407,7 +574,9 @@ namespace AnnW.LanMp.Authority
                 case "host-left":
                     return "主机已离开，对局结束";
                 case "guest-left":
-                    return "客机已离开，对局结束";
+                    return "有客机离开，对局结束";
+                case "guest-seat-ai":
+                    return "客机已离开，该席位由 AI 接管";
                 case "leave-room":
                     return "已离开对局";
                 case "disconnect":
@@ -420,7 +589,7 @@ namespace AnnW.LanMp.Authority
                 case "app-quit":
                     return "连接已断开，对局结束";
                 case "broadcast-failed":
-                    return "同步失败（操作未能发给对方），对局结束";
+                    return "同步失败（操作未能发给全体客机），对局结束";
                 default:
                     return string.IsNullOrEmpty(detail)
                         ? ("对局中止：" + (reason ?? "unknown"))
@@ -428,8 +597,127 @@ namespace AnnW.LanMp.Authority
             }
         }
 
+        private void OnPeerDisconnected(string peerId, string reason)
+        {
+            // Lobby seat release is LobbySession's job.
+            if (_net.Role != PeerRole.Host || !InLanBattle || MatchSettled)
+                return;
+
+            // Guest quit / drop: keep Host sim running — convert that seat to AI (spectate design).
+            _log.LogWarning("[Authority] Guest left mid-battle peer=" + peerId +
+                            " — converting seat to AI (match continues)");
+            try
+            {
+                HandleGuestLeftContinue(peerId, reason);
+            }
+            catch (Exception ex)
+            {
+                _log.LogError("[Authority] HandleGuestLeftContinue: " + ex);
+            }
+        }
+
+        /// <summary>
+        /// Guest TCP gone: RemoteHuman → AI, optional EndTurn if it was their turn.
+        /// Does not AbortMatch (Host exit still ends the match).
+        /// </summary>
+        private void HandleGuestLeftContinue(string peerId, string reason)
+        {
+            SlotBinding slot = null;
+            foreach (var s in _slots)
+            {
+                if (s != null && s.Kind == SlotKind.RemoteHuman &&
+                    string.Equals(s.OwnerPeerId, peerId, StringComparison.Ordinal))
+                {
+                    slot = s;
+                    break;
+                }
+            }
+
+            Player player = null;
+            if (slot != null)
+            {
+                slot.Kind = SlotKind.AI;
+                slot.OwnerPeerId = null;
+                player = TryGetPlayerByIndex(slot.PosInd);
+            }
+            else
+            {
+                // Draft fallback when _slots missed peer (map rebuild edge).
+                var draft = _lobby.Draft;
+                if (draft?.seats != null)
+                {
+                    for (var i = 0; i < draft.seats.Length; i++)
+                    {
+                        var seat = draft.seats[i];
+                        if (seat != null && string.Equals(seat.peerId, peerId, StringComparison.Ordinal))
+                        {
+                            player = TryGetPlayerByIndex(i);
+                            break;
+                        }
+                    }
+                }
+            }
+
+            if (player != null && !player.defeated)
+            {
+                player.is_ai = true;
+                if (player.ai == null)
+                {
+                    try
+                    {
+                        AccessTools.Method(typeof(Player), "InitAI")?.Invoke(player, null);
+                    }
+                    catch (Exception ex)
+                    {
+                        _log.LogWarning("[Authority] InitAI: " + ex.Message);
+                    }
+                }
+            }
+
+            UiFeedback.Push(MapAbortMessage("guest-seat-ai", peerId));
+            BattleSyncTrace.Ev("GuestLeftContinue", detail: peerId + ":" + (reason ?? ""));
+
+            var battle = GS_Battle.self;
+            if (player != null && battle?.cur_player != null &&
+                battle.cur_player.index == player.index && !player.defeated)
+            {
+                try
+                {
+                    var sync = LanMpPlugin.Instance?.Sync;
+                    if (sync != null)
+                    {
+                        _log.LogInfo("[Authority] Forcing EndTurn after guest drop on their turn");
+                        sync.SubmitIntent(sync.BuildIntent("EndTurn"), guestOptimisticApply: false);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _log.LogWarning("[Authority] Force EndTurn: " + ex.Message);
+                }
+            }
+        }
+
+        private static Player TryGetPlayerByIndex(int index)
+        {
+            var battle = GS_Battle.self;
+            if (battle?.all_player?.players == null || index < 0)
+                return null;
+            foreach (var p in battle.all_player.players)
+            {
+                if (p != null && p.index == index)
+                    return p;
+            }
+            if (index < battle.all_player.players.Count)
+                return battle.all_player.players[index];
+            return null;
+        }
+
         private void OnNetDisconnected(string reason)
         {
+            // Settled MatchEnd already left battle / may drop peers — not an abort.
+            if (MatchSettled)
+                return;
+
             if (!InLanBattle && !_abortApplied)
             {
                 // Lobby-only disconnect: nothing to abort in battle.
@@ -438,12 +726,9 @@ namespace AnnW.LanMp.Authority
             if (!InLanBattle && _abortApplied)
                 return;
 
-            // Host still hosting after guest drop: DropGuestKeepHosting fires OnDisconnected with Role=Host.
+            // Host peer drops no longer FireDisconnected (see NetSession) — handled by OnPeerDisconnected.
             if (_net.Role == PeerRole.Host)
-            {
-                AbortMatch("guest-left", reason, broadcast: false, loadMenu: true);
                 return;
-            }
 
             // Guest lost host / connection (Role may already be None after Disconnect).
             var hostGone = reason != null && (
@@ -454,7 +739,8 @@ namespace AnnW.LanMp.Authority
                 reason == "heartbeat-timeout" ||
                 reason == "heartbeat-send-fail" ||
                 reason == "plugin-stop" ||
-                reason == "app-quit");
+                reason == "app-quit" ||
+                reason == "match-abort-peer-left");
             ApplyMatchAbortLocal(hostGone ? "host-left" : "disconnect", reason, loadMenu: true);
         }
 
@@ -466,6 +752,7 @@ namespace AnnW.LanMp.Authority
             {
                 BattleEventBus.self.OnPlayerTurnStarted += OnPlayerTurnStarted;
                 BattleEventBus.self.OnPlayerTurnEnded += OnPlayerTurnEnded;
+                BattleEventBus.self.OnPlayerDefeat += OnPlayerDefeat;
                 _battleEventsHooked = true;
             }
             catch (Exception ex)
@@ -482,9 +769,26 @@ namespace AnnW.LanMp.Authority
             {
                 BattleEventBus.self.OnPlayerTurnStarted -= OnPlayerTurnStarted;
                 BattleEventBus.self.OnPlayerTurnEnded -= OnPlayerTurnEnded;
+                BattleEventBus.self.OnPlayerDefeat -= OnPlayerDefeat;
             }
             catch { /* ignore */ }
             _battleEventsHooked = false;
+        }
+
+        private void OnPlayerDefeat(Player defeated)
+        {
+            if (!InLanBattle || defeated == null)
+                return;
+            var local = TryGetLocalHumanPlayer();
+            if (local == null || defeated.index != local.index)
+                return;
+
+            _log.LogInfo("[Authority] Local human defeated — entering spectate idx=" + local.index);
+            // Spectate only — no MatchEnd / settlement until Host EndGame (faction may still win).
+            UiFeedback.Push("已战败，进入观战");
+            ApplyLocalViewBinding("local-defeated");
+            AnnW.LanMp.Presentation.RemoteTurnPresentation.ClearSpectateUxOverlays(
+                "local-defeated", _log);
         }
 
         private void OnPlayerTurnStarted(Player player, int turn)
@@ -492,7 +796,8 @@ namespace AnnW.LanMp.Authority
             ApplyLocalViewBinding("turn-start");
             // Host+Guest: entering a foreign/AI seat must drop local MOVE_SELECT threat overlays
             // (INV-VIEW spectate). Otherwise hover shows own attack range instead of enemy threat.
-            if (player != null && (player.is_ai || !IsLocalPlayersTurn(player.index)))
+            if (IsLocalHumanDefeated() ||
+                (player != null && (player.is_ai || !IsLocalPlayersTurn(player.index))))
             {
                 AnnW.LanMp.Presentation.RemoteTurnPresentation.ClearSpectateUxOverlays(
                     "turn-start-spectate", _log);
@@ -593,21 +898,43 @@ namespace AnnW.LanMp.Authority
             if (env.Type != MsgType.MatchEnd)
                 return;
             var end = JsonUtil.FromJson<MatchEndPayload>(env.PayloadJson);
-            _log.LogInfo($"[Authority] MatchEnd received victory={end?.victory} reason={end?.reason}");
-            BattleSyncTrace.Ev("MatchEnd", detail: "recv victory=" + (end?.victory ?? false) + " " + (end?.reason ?? ""));
+            if (end == null)
+            {
+                _log.LogWarning("[Authority] MatchEnd payload parse failed — settling with fallback");
+                end = new MatchEndPayload
+                {
+                    victory = false,
+                    victoryFlag = false,
+                    reason = "parse-fail",
+                    battleId = env.BattleId ?? ""
+                };
+            }
+            _log.LogInfo($"[Authority] MatchEnd received victory={end.victory} reason={end.reason}");
+            BattleSyncTrace.Ev("MatchEnd", detail: "recv victory=" + end.victory + " " + (end.reason ?? ""));
+            BattleSyncTrace.EndBattleSession("MatchEnd");
+            // No vanilla EndGame — leave battle and show settlement from payload (network may drop).
+            ApplyMatchSettlementLocal(end, dropPeers: true);
+        }
+
+        private bool ResolveLocalMatchVictory(MatchEndPayload end)
+        {
+            int? localFrac = null;
             try
             {
-                if (SingletonMono<SS_ANNW_Game>.self != null && end != null)
-                {
-                    var mi = AccessTools.Method(typeof(SS_ANNW_Game), "EndGame", new[] { typeof(bool) });
-                    mi?.Invoke(SingletonMono<SS_ANNW_Game>.self, new object[] { end.victory });
-                }
+                var p = TryGetLocalHumanPlayer();
+                if (p != null)
+                    localFrac = (int)p.fraction;
             }
-            catch (Exception ex)
-            {
-                _log.LogWarning("[Authority] EndGame apply: " + ex.Message);
-            }
-            BattleSyncTrace.EndBattleSession("MatchEnd");
+            catch { /* battle may be mid-teardown */ }
+
+            // Guest must never use Host EndGame(bool); Host may as last resort only.
+            var allowHostFlag = _net.Role == PeerRole.Host;
+            return MatchEndRules.ResolveLocalVictory(
+                end,
+                GetLocalHumanSlotIndex(),
+                _net.LocalPeerId,
+                localFrac,
+                allowHostFlag);
         }
     }
 }

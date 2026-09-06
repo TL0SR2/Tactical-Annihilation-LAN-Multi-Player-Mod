@@ -56,11 +56,12 @@ namespace AnnW.LanMp.Ui
             {
                 if (v == 1) return LAN.Get("UI_DestoryCO");
                 if (v == 2) return LAN.Get("UI_DestoryAllUnits");
+                if (v == 3) return LAN.Get("UI_None");
                 return LAN.Get("UI_DestoryCOAndFactory");
             }
             catch
             {
-                return v == 1 ? "击杀指挥官" : v == 2 ? "全歼" : "击杀指挥与工厂";
+                return v == 1 ? "击杀指挥官" : v == 2 ? "全歼" : v == 3 ? "无" : "击杀指挥与工厂";
             }
         }
 
@@ -476,7 +477,8 @@ namespace AnnW.LanMp.Ui
             {
                 new LanDropMenu.Option(WinLabel(0), 0),
                 new LanDropMenu.Option(WinLabel(1), 1),
-                new LanDropMenu.Option(WinLabel(2), 2)
+                new LanDropMenu.Option(WinLabel(2), 2),
+                new LanDropMenu.Option(WinLabel(3), 3)
             }, _win, id =>
             {
                 if (!IsHost() || _applyingRemote || LanSeatCell.SuppressCallbacks) return;
@@ -954,9 +956,7 @@ namespace AnnW.LanMp.Ui
             {
                 if (lobby == null || string.IsNullOrEmpty(pid))
                     return false;
-                if (pid == plugin.Net.LocalPeerId)
-                    return lobby.LocalReady;
-                return lobby.RemoteReady;
+                return lobby.IsPeerReady(pid);
             };
             LanRoomSeats.Rebuild(_seatList, draft, peer, IsHost(), ready, OnSeatUiChanged);
         }
@@ -994,8 +994,13 @@ namespace AnnW.LanMp.Ui
             if (net.Role == PeerRole.Host && !net.IsConnected)
             {
                 if (joinable <= 0)
-                    return "状态：可加入空位 0 — 将 AI 槽切为「人类位·暂 AI」以开放加入（当前最多再进 1 名真人）";
-                return "状态：可加入空位 " + joinable + " · 人类 " + seated + " — 等待玩家（当前最多再进 1 名真人）";
+                    return "状态：可加入空位 0 — 将 AI 槽切为「人类位·暂 AI」以开放加入";
+                return "状态：监听中 · 可加入空位 " + joinable + " · 人类 " + seated + " — 等待玩家加入";
+            }
+            if (net.Role == PeerRole.Host && net.IsConnected)
+            {
+                return "状态：已连接客机 " + net.ConnectedPeerCount + " · 人类 " + seated +
+                       " · 可加入 " + joinable + (lobby.CanStart ? " — 可以开战" : " — 等待准备");
             }
             if (string.IsNullOrEmpty(draft?.mapId))
                 return net.Role == PeerRole.Host ? "状态：请选择地图" : "状态：等待房主选择地图";
@@ -1074,13 +1079,15 @@ namespace AnnW.LanMp.Ui
         {
             LanDropMenu.CloseOpen();
             var plugin = LanMpPlugin.Instance;
-            if (plugin?.Authority != null && plugin.Authority.InLanBattle)
+            if (plugin?.Authority != null && plugin.Authority.InLanBattle && !plugin.Authority.MatchSettled)
             {
-                if (plugin.Net.Role == PeerRole.Host)
-                    plugin.Authority.AbortMatch("leave-room", "leave-room", broadcast: true);
-                else
-                    plugin.Authority.AbortMatch("leave-room", "leave-room", broadcast: false);
-                plugin.Net.Disconnect("leave-room");
+                plugin.Authority.NotifyLeavingBattle("leave-room");
+                if (plugin.Net.Role == PeerRole.Host && plugin.Net.IsConnected)
+                {
+                    try { plugin.Net.Disconnect("leave-room"); }
+                    catch { /* ignore */ }
+                }
+                // Guest NotifyLeavingBattle already Disconnects.
                 return;
             }
 

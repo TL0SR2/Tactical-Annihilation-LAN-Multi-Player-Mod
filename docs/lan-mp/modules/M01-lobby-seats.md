@@ -103,13 +103,24 @@
 |:---|:---|:---|:---|
 | 地图 / 迷雾 / 胜负 / 开局单位 | ✅ | ❌ | ❌ |
 | 槽状态：关 / 纯 AI / 人类位 | ✅ | ❌ | ❌ |
-| AI 难度（纯 AI 与 Standby） | ✅ | ❌ | ❌ |
+| AI 难度（纯 AI 与 Standby；含 Custom） | ✅ | ❌ | ❌ |
+| 经济倍率 `resPercent`（全槽，含已入座人类） | ✅ | ❌ | ❌ |
+| 自定义 AI 智 `aiIntelligence`（纯 AI / Standby） | ✅ | ❌ | ❌ |
 | `team`（阵营） | 纯 AI / Standby：✅；已入座：❌ | ✅（玩家自选） | ❌ |
 | `color` | 纯 AI / Standby：✅；已入座：❌ | ✅ | ❌ |
 | `posMode` / `pos` | 纯 AI / Standby：✅；已入座：❌ | ✅ | ❌ |
 | `coId`（及开战必需附属） | 纯 AI / Standby：✅；已入座：❌ | ✅ | ❌ |
 | Ready | 自己 | 自己 | — |
 | 开战按钮 | ✅ | ❌ | ❌ |
+
+改经济倍率或 AI 智时，若该槽仍是预设 AI 档（Beginner…Crazy），Host 自动升为 `PlayerControl.Custom`，以便 `GS_Battle.SetupForSkirmish` 采用 `SGS_Player.res_percent` / `ai_interlligence`。
+
+开战映射（`SkirmishSeatEconomy.ResolveForStart`）：
+- **人类**：`controller=Human`，`res_percent` 写入（`SetupForSkirmish` 在 `>0` 时赋给 `Player.res_mul`，由 `WP_ResGen.UpdateEconomy` 消费）。
+- **AI**：若座位经济/智与预设档一致 → 保留该预设 controller；若 Host 改过任一项 → **强制 Custom**，并把两项浮点写入 SGS（预设档会忽略 SGS 浮点，只有 Custom/Human 路径会读）。
+- **AI 智**：仅纯 AI / Standby 座位可编辑；人类槽显示「—」。
+
+**客机生效（硬保证）：** `LobbyStart` 携带完整 Host Draft（含 `resPercent`）；Guest 用同一 `payload.draft` 建 `StartGameSetting`。另在 `GS_Battle.SetupForSkirmish`（private，字符串 Patch）/ `PrepareBattle` 后按 **exist-SGS 与 live 列表顺序**（Setup 末尾 `players=list`+`RefreshIndex`，勿用 `pos_ind`）强制写回 `Player.res_mul` / `ai_intelligence`。SGS≤0 时按预设 `GetAIDiff*` / Custom→1.0 回退。启动 `GameCompatProbe` 对比 `DataUtils` 表与 `PlayerControl.Custom`；房间 UI 优先读 live 表。战中附件带 `PlayerSnapDto.resMul`。
 
 **颜色唯一（强制）：** 全场已启用槽（纯 AI / Standby / Seated）占用的颜色不可再选；冲突 → `SeatEditNack(ColorTaken)`，以到达 Host 顺序先到先得。不可关闭。
 
@@ -167,29 +178,19 @@ Guest TCP connect
 
 ### 7.3 网络分期（期 A / 期 B）
 
-当前传输层是 **Host ↔ 单一 Guest 的一条 TCP**（第二台机器连上来会被踢掉或占坑，且没有正规 Reject）。  
-座位方案在语义上支持「多个 HumanStandby → 多个真人」，但 **多真人同时在线** 需要 Host 同时维护多条连接并按 peer 广播。这两件事拆开做：
-
-| 期 | 做什么 | 故意先不做 |
+| 期 | 状态 | 内容 |
 |:---|:---|:---|
-| **A** | 座位状态机、字段归属、Request/Nack、色/位唯一仲裁、Bake、`LobbyReject` 可解析；**传输仍最多 1 名 Guest** | 3+ 真人同时连入 |
-| **B** | 多路 Accept、按 peer 广播 Draft/Ready、`joinableSlots` 可同时坐满多名真人 | — |
+| **A** | 已完成 | 座位状态机、Reject、Bake；传输曾限制 1 Guest |
+| **B** | **已落地（0.18.0）** | Host 多路 TCP Accept、`TryBroadcast` Draft/Ready/Command、入房上限 = `CountJoinable`（`HumanStandby`）；`IntentNack` 按 `SourcePeerId` 定向 |
 
-**期 A 的具体玩法含义：**
+**期 B 玩法：**
 
-1. 房主创建 → 仅自己是人类，其余纯 AI → 外人加入会被 `LobbyReject`（无人形空位）。  
-2. 房主开 **1 个** `HumanStandby` → 恰好允许 **1 名** 客机加入并入座；色/阵营/位/CO 按本文自选。  
-3. 房主若再开第 2、第 3 个 `HumanStandby`：这些坑在房间里仍是「暂 AI」，**可以开打**（Standby 不挡 Ready），但 **期 A 不会再接入第 2 名真人**——传输层已有 Guest 时，新人 Hello → `LobbyReject(RoomFull)`（或 `GuestSlotTaken`：当前版本仅支持 1 名客机）。  
-4. 因此期 A 必须把 Reject 做对：客机看到明确文案，而不是「连上又断 / 无提示」。
+1. 房主创建 → 仅自己是人类，其余纯 AI → 外人加入 → `LobbyReject(NoHumanSlot)`。  
+2. 房主开 N 个 `HumanStandby` → 最多同时接入 N 名客机；坐满后再来 → `NoHumanSlot`。  
+3. 大厅中一名客机断开 → 仅释放该席并广播 Draft；对局中任一客机断开仍整局 Abort（首版策略）。  
+4. Host 权威 Command fan-out 至全体已连接 Guest；各 Guest Intent → Host Accept → 全员 Apply。
 
-**期 A 对 Host UI 的约束（已拍板采用）：**  
-允许 Host 开多个 `HumanStandby`（方便先摆好「多人位 + 暂 AI」的阵容再开打），但顶部固定提示：
-
-> 当前联机最多再进入 1 名真人；其余人类位将以 AI 占位参战，直至多人连接版本。
-
-（不强制「最多 1 个 Standby」——避免房主无法预摆 3v3 里「两个人类位暂 AI」的配置。）
-
-**为何先期 A：** 座位归属与入房拒绝是体验正确性的主干；多连接是传输工程量，绑在同一里程碑会拖垮审查与验收。期 A 用 2 人实机即可验完状态机与 Reject；期 B 再验 3+ 人。
+**UI：** 房间状态显示已连接客机数 / 可加入空位；不再提示「最多再进 1 名真人」。
 
 ---
 

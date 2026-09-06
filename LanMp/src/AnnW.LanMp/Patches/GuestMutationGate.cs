@@ -57,8 +57,23 @@ namespace AnnW.LanMp.Patches
                 }
 
                 var intentKind = KindToIntent(kind);
-                if (IntentValidateRules.IsUnitSpentForIntent(intentKind, unit.moved, unit.actioned))
+                var cateVal = cate.HasValue ? (int)cate.Value : -1;
+                if (IntentValidateRules.IsUnitSpentForIntent(intentKind, unit.moved, unit.actioned, cateVal))
                     return false;
+
+                // Move range: safe to check at current pos. DoAction must wait — EQ stashes
+                // attack-from-destination while unit is still at the old tile locally.
+                if (kind == Kind.UnitMoved && target.HasValue)
+                {
+                    if (!ActionLegality.TryValidateUnitMoved(
+                            unit, target.Value.x, target.Value.y, out var moveErr))
+                    {
+                        var msg = ActionLegality.MapUserMessage(moveErr);
+                        if (!string.IsNullOrEmpty(msg))
+                            GateUtil.Toast(msg);
+                        return false;
+                    }
+                }
             }
             else if (kind == Kind.EndTurn || kind == Kind.Undo || kind == Kind.CastSkill)
             {
@@ -70,7 +85,8 @@ namespace AnnW.LanMp.Patches
 
             if (!GateUtil.GuestMayEmitIntent(plugin))
             {
-                // EQ move→build: UnitMoved await is open — stash DoAction for after Command lands.
+                // EQ move→action: UnitMoved await is open — stash DoAction for after Command lands.
+                // Do not range-check here (unit not yet at destination on Guest).
                 if (kind == Kind.DoAction)
                 {
                     var follow = plugin.Sync.BuildIntent(
@@ -81,6 +97,23 @@ namespace AnnW.LanMp.Patches
                         return false;
                 }
                 return false;
+            }
+
+            // Direct DoAction (no pending Move): fail-fast with Host-identical legality.
+            if (kind == Kind.DoAction)
+            {
+                var cateVal = cate.HasValue ? (int)cate.Value : -1;
+                var hasTarget = target.HasValue;
+                var tx = hasTarget ? target.Value.x : 0;
+                var ty = hasTarget ? target.Value.y : 0;
+                if (!ActionLegality.TryValidateDoAction(
+                        unit, cateVal, hasTarget, tx, ty, out var legalErr))
+                {
+                    var msg = ActionLegality.MapUserMessage(legalErr);
+                    if (!string.IsNullOrEmpty(msg))
+                        GateUtil.Toast(msg);
+                    return false;
+                }
             }
 
             var intent = plugin.Sync.BuildIntent(

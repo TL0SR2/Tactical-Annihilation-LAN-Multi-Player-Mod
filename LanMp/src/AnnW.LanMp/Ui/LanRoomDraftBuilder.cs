@@ -125,15 +125,30 @@ namespace AnnW.LanMp.Ui
                 seats = seats
             };
 
-            // Re-seat existing guest into first standby if already connected (map change mid-session).
-            if (net != null && net.Role == PeerRole.Host && net.IsConnected
-                && !string.IsNullOrEmpty(net.RemotePeerId))
+            // Re-seat every connected guest into HumanStandby slots (map change mid-session).
+            if (net != null && net.Role == PeerRole.Host && net.IsConnected)
             {
-                // Need a standby first
-                if (seats.Length > 1)
-                    LobbySeatLogic.TryPromoteToStandby(seats[1], out _);
-                LobbySeatLogic.TrySeatHuman(draft, net.RemotePeerId, guestName ?? net.RemoteDisplayName,
-                    out _, out _);
+                var peers = net.GetConnectedPeerIds();
+                var standbyIdx = 1;
+                foreach (var peerId in peers)
+                {
+                    if (string.IsNullOrEmpty(peerId) || peerId == hostPeer)
+                        continue;
+                    while (standbyIdx < seats.Length &&
+                           LobbySeatLogic.GetState(seats[standbyIdx]) != LobbySeatState.Ai &&
+                           LobbySeatLogic.GetState(seats[standbyIdx]) != LobbySeatState.HumanStandby)
+                        standbyIdx++;
+                    if (standbyIdx >= seats.Length)
+                        break;
+                    if (LobbySeatLogic.GetState(seats[standbyIdx]) == LobbySeatState.Ai)
+                        LobbySeatLogic.TryPromoteToStandby(seats[standbyIdx], out _);
+                    var display = net.GetPeerDisplayName(peerId);
+                    if (string.IsNullOrEmpty(display))
+                        display = peerId;
+                    LobbySeatLogic.TrySeatHuman(draft, peerId, display, out _, out _);
+                    standbyIdx++;
+                }
+                LobbySeatLogic.RefreshLegacyGuestFields(draft);
             }
 
             return true;
@@ -156,7 +171,10 @@ namespace AnnW.LanMp.Ui
                     continue;
                 if (s.peerId == draft.hostPeerId || i == draft.hostSlotIndex)
                     s.occupantName = draft.hostDisplayName;
-                else if (!string.IsNullOrEmpty(draft.guestPeerId) && s.peerId == draft.guestPeerId)
+                // Keep existing non-host occupantName if already set; only fill legacy guest name
+                // for the first guestPeerId seat when occupant is empty.
+                else if (string.IsNullOrEmpty(s.occupantName) &&
+                         !string.IsNullOrEmpty(draft.guestPeerId) && s.peerId == draft.guestPeerId)
                     s.occupantName = string.IsNullOrEmpty(draft.guestDisplayName) ? "" : draft.guestDisplayName;
             }
         }

@@ -48,13 +48,30 @@ namespace AnnW.LanMp.Sync
         private bool _handlingBroadcastFail;
         private CommandApplyQueue _applyQueue;
 
+        /// <summary>
+        /// Host outbound Commands: CaptureBoard + TCP off TurnLoop / turn-started stacks
+        /// (INV-T + AnnW CoroutineObject — sync capture during AI EndTurn white-screens).
+        /// </summary>
+        private readonly Queue<CommandDto> _outboundCmds = new Queue<CommandDto>();
+        private bool _outboundPumping;
+
         /// <summary>Guest: one mutating Intent in flight until matching Command/Nack (ADR-001).</summary>
         private string _guestAwaitIntentId;
         private string _guestAwaitKind;
         private float _guestAwaitSince;
+        private bool _guestAwaitSoftWarned;
         private IntentDto _guestPendingFollowUp;
         private int _guestUndoAvailable;
-        private const float GuestAwaitTimeoutSec = 20f;
+        /// <summary>Warn Guest once; keep await (do not clear — Host may still Accept).</summary>
+        private const float GuestAwaitSoftTimeoutSec = 20f;
+        /// <summary>Only then allow a new Intent; premature clear caused double-Accept under lag.</summary>
+        private const float GuestAwaitHardTimeoutSec = 60f;
+        /// <summary>When true, Intent reject may wire IntentNack to Guest (network Intent only).</summary>
+        private bool _nackGuestOnReject;
+        /// <summary>Host: Intent.intentId → SourcePeerId for directed Nack.</summary>
+        private readonly Dictionary<string, string> _intentSourcePeer =
+            new Dictionary<string, string>(StringComparer.Ordinal);
+        private string _nackTargetPeerId;
 
         public TurnAuthority TurnAuth { get; set; }
 
@@ -89,6 +106,8 @@ namespace AnnW.LanMp.Sync
             if (TurnAuth != null)
                 TurnAuth.OnHostEndTurnReady -= OnTurnAuthEndTurnReady;
             _applyQueue?.Clear();
+            _outboundCmds.Clear();
+            _outboundPumping = false;
             UnhookBattleEvents();
             _seenIntentIds.Clear();
             _guestOptimisticDone.Clear();
@@ -111,6 +130,8 @@ namespace AnnW.LanMp.Sync
             else
             {
                 UnhookBattleEvents();
+                _outboundCmds.Clear();
+                _outboundPumping = false;
                 _seenIntentIds.Clear();
                 _guestOptimisticDone.Clear();
                 ClearGuestAwait();
@@ -177,9 +198,9 @@ namespace AnnW.LanMp.Sync
         {
             if (cmd == null || _net.Role != PeerRole.Host)
                 return;
-            // Bus path (not HostAccept suppress): capture board then broadcast.
+            // Bus / AI path: never CaptureBoard on the turn-started stack — outbound pump
+            // attaches after NextTick so TurnLoop can Update (Host AI EndTurn white-screen).
             TurnAuth?.ConsumePendingEndTurn();
-            TurnAuth?.AttachBoardSnapshot(cmd);
             HostBroadcastCommand(cmd);
         }
 
@@ -479,11 +500,19 @@ namespace AnnW.LanMp.Sync
                 return true;
             if (string.IsNullOrEmpty(_guestAwaitIntentId))
                 return true;
-            if (Time.unscaledTime - _guestAwaitSince >= GuestAwaitTimeoutSec)
+            var waited = Time.unscaledTime - _guestAwaitSince;
+            if (waited >= GuestAwaitHardTimeoutSec)
             {
-                _log.LogWarning("[Sync] Guest await Intent timeout — clearing " + _guestAwaitIntentId);
-                ClearGuestAwait();
+                _log.LogWarning("[Sync] Guest await Intent hard-timeout — clearing " + _guestAwaitIntentId);
+                GateUtilToast("主机确认超时，可重试操作");
+                ClearGuestAwait("hard-timeout");
                 return true;
+            }
+            if (waited >= GuestAwaitSoftTimeoutSec && !_guestAwaitSoftWarned)
+            {
+                _guestAwaitSoftWarned = true;
+                _log.LogWarning("[Sync] Guest await Intent slow — keeping lock " + _guestAwaitIntentId);
+                GateUtilToast("主机响应较慢，请稍候");
             }
             blockReason = InputGateRules.WaitingHostConfirm;
             return false;
@@ -499,6 +528,7 @@ namespace AnnW.LanMp.Sync
             _guestAwaitIntentId = intentId;
             _guestAwaitKind = kind;
             _guestAwaitSince = Time.unscaledTime;
+            _guestAwaitSoftWarned = false;
             BattleSyncTrace.Ev("GuestAwaitBegin", kind: kind, intentId: intentId);
         }
 
@@ -511,6 +541,7 @@ namespace AnnW.LanMp.Sync
             _guestAwaitIntentId = null;
             _guestAwaitKind = null;
             _guestAwaitSince = 0f;
+            _guestAwaitSoftWarned = false;
 
             var pending = _guestPendingFollowUp;
             _guestPendingFollowUp = null;
@@ -561,7 +592,7 @@ namespace AnnW.LanMp.Sync
                 return;
             }
 
-            // AutoCmd: keep flight lock until AutoCmd ack (Bus UnitMoved/DoAction lack sourceIntentId).
+            // AutoCmd: Host Bus emits UnitMoved/DoAction without sourceIntentId; wait for AutoCmd ack.
             if (_guestAwaitKind == "AutoCmd")
             {
                 if (cmd != null && cmd.kind == "AutoCmd")
@@ -569,11 +600,7 @@ namespace AnnW.LanMp.Sync
                 return;
             }
 
-            if (cmd != null &&
-                (cmd.kind == "DoAction" || cmd.kind == "UnitMoved" || cmd.kind == "CastSkill" ||
-                 cmd.kind == "EndTurn" || cmd.kind == "Undo" || cmd.kind == "RemoveUnit" ||
-                 cmd.kind == "AutoCmd"))
-                ClearGuestAwait("cmd-" + cmd.kind);
+            // Multi-guest: never clear await on another peer's Command kind alone.
         }
 
         public void SubmitIntent(IntentDto intent, bool guestOptimisticApply = true)
@@ -586,7 +613,8 @@ namespace AnnW.LanMp.Sync
             if (_net.Role == PeerRole.Host)
             {
                 BattleSyncTrace.EvIntent("IntentHostLocal", intent);
-                HostAcceptIntent(intent);
+                // Host-local Accept must not wire IntentNack to Guest (INV-VIEW spectate toast).
+                HostAcceptIntent(intent, fromGuestNetwork: false);
                 return;
             }
 
@@ -638,8 +666,89 @@ namespace AnnW.LanMp.Sync
             if (string.IsNullOrEmpty(cmd.cmdId))
                 cmd.cmdId = Guid.NewGuid().ToString("N");
 
+            // Stamp only — CaptureBoard + TCP run on outbound pump after NextTick.
             StampPresentationHints(cmd);
-            MaybeAttachResults(cmd);
+            _outboundCmds.Enqueue(cmd);
+            EnsureOutboundPump();
+        }
+
+        private void EnsureOutboundPump()
+        {
+            if (_outboundPumping || _outboundCmds.Count == 0)
+                return;
+            if (TryStartCoroutine(CoOutboundPump()))
+                return;
+
+            // No GameController yet — flush sync (lobby/bootstrap edge).
+            while (_outboundCmds.Count > 0)
+            {
+                var cmd = _outboundCmds.Dequeue();
+                if (!FlushOutboundCommand(cmd))
+                {
+                    BattleSyncTrace.EvCommand("CmdBroadcastFail", cmd);
+                    FailBroadcastAfterApply(cmd.kind ?? "cmd", "send-failed");
+                    _outboundCmds.Clear();
+                    return;
+                }
+            }
+        }
+
+        private IEnumerator CoOutboundPump()
+        {
+            _outboundPumping = true;
+            try
+            {
+                while (_outboundCmds.Count > 0)
+                {
+                    // Breathe before CaptureBoard so TurnLoop / AI coroutine can Update.
+                    yield return AnnWCoroutine.NextTick;
+                    if (_outboundCmds.Count == 0)
+                        break;
+
+                    var cmd = _outboundCmds.Dequeue();
+                    var ok = FlushOutboundCommand(cmd);
+                    if (!ok)
+                    {
+                        // One retry after another tick — transient TCP under Host hitch.
+                        yield return AnnWCoroutine.NextTick;
+                        ok = TrySendPreparedCommand(cmd);
+                    }
+
+                    if (!ok)
+                    {
+                        BattleSyncTrace.EvCommand("CmdBroadcastFail", cmd);
+                        FailBroadcastAfterApply(cmd.kind ?? "cmd", "send-failed");
+                        _outboundCmds.Clear();
+                        yield break;
+                    }
+
+                    var hasAttach = !string.IsNullOrEmpty(cmd.resultAttachmentJson);
+                    BattleSyncTrace.EvCommand("CmdBroadcast", cmd);
+                    _log.LogInfo(
+                        $"[Sync] Command broadcast kind={cmd.kind} unit={cmd.netUnitId} attach={hasAttach}");
+                }
+            }
+            finally
+            {
+                _outboundPumping = false;
+                // Commands enqueued while we were finishing — restart pump.
+                if (_outboundCmds.Count > 0)
+                    EnsureOutboundPump();
+            }
+        }
+
+        /// <summary>Attach payload + stamp hash/undo + send. Returns false on send failure.</summary>
+        private bool FlushOutboundCommand(CommandDto cmd)
+        {
+            if (cmd == null)
+                return true;
+
+            // EndTurn board capture deferred here (bus AI path + Accept enqueue).
+            if (cmd.kind == "EndTurn" && string.IsNullOrEmpty(cmd.resultAttachmentJson))
+                TurnAuth?.AttachBoardSnapshot(cmd);
+            else
+                MaybeAttachResults(cmd);
+
             if (cmd.kind == "EndTurn")
                 LanMpPlugin.Instance?.Checksum?.StampEndTurnHash(cmd);
 
@@ -650,10 +759,17 @@ namespace AnnW.LanMp.Sync
             }
             catch { cmd.undoAvailable = 0; }
 
-            var ok = false;
+            return TrySendPreparedCommand(cmd);
+        }
+
+        private bool TrySendPreparedCommand(CommandDto cmd)
+        {
             try
             {
-                ok = _net.TrySend(new Envelope
+                if (_net.ConnectedPeerCount == 0)
+                    return true;
+
+                return _net.TryBroadcast(new Envelope
                 {
                     Type = MsgType.Command,
                     BattleId = cmd.battleId ?? "",
@@ -663,20 +779,8 @@ namespace AnnW.LanMp.Sync
             catch (Exception ex)
             {
                 _log.LogError("[Sync] Command broadcast exception: " + ex.Message);
-                ok = false;
+                return false;
             }
-
-            if (!ok)
-            {
-                BattleSyncTrace.EvCommand("CmdBroadcastFail", cmd);
-                // Host already applied (Accept or local Bus). Guest would desync — abort match.
-                FailBroadcastAfterApply(cmd.kind ?? "cmd", "send-failed");
-                return;
-            }
-
-            var hasAttach = !string.IsNullOrEmpty(cmd.resultAttachmentJson);
-            BattleSyncTrace.EvCommand("CmdBroadcast", cmd);
-            _log.LogInfo($"[Sync] Command broadcast kind={cmd.kind} unit={cmd.netUnitId} attach={hasAttach}");
         }
 
         private static void StampPresentationHints(CommandDto cmd)
@@ -756,9 +860,11 @@ namespace AnnW.LanMp.Sync
             _handlingBroadcastFail = true;
             try
             {
+                _outboundCmds.Clear();
                 _log.LogError($"[Sync] Applied-not-broadcast kind={kind} detail={detail} — aborting match");
-                _authority.AbortMatch("broadcast-failed", kind + ":" + (detail ?? ""), broadcast: false, loadMenu: true);
-                try { _net.Disconnect("broadcast-failed"); }
+                // Notify remaining Guests then drop them; keep Host listener for lobby return.
+                _authority.AbortMatch("broadcast-failed", kind + ":" + (detail ?? ""), broadcast: true, loadMenu: true);
+                try { _net.DropAllPeersKeepHosting("broadcast-failed"); }
                 catch { /* ignore */ }
             }
             finally
@@ -792,15 +898,63 @@ namespace AnnW.LanMp.Sync
             }
         }
 
-        public void HostAcceptIntent(IntentDto intent)
+        /// <param name="fromGuestNetwork">
+        /// True only for Intents received over the wire. Host-local SubmitIntent failures
+        /// must not SendIntentNack — Guest would toast while spectating Host Undo.
+        /// </param>
+        public void HostAcceptIntent(IntentDto intent, bool fromGuestNetwork = false)
         {
             if (intent == null)
                 return;
 
+            var prevNack = _nackGuestOnReject;
+            var prevTarget = _nackTargetPeerId;
+            _nackGuestOnReject = fromGuestNetwork;
+            if (fromGuestNetwork &&
+                !string.IsNullOrEmpty(intent.intentId) &&
+                _intentSourcePeer.TryGetValue(intent.intentId, out var src))
+                _nackTargetPeerId = src;
+            else
+                _nackTargetPeerId = null;
+            try
+            {
+                HostAcceptIntentCore(intent);
+            }
+            finally
+            {
+                _nackGuestOnReject = prevNack;
+                _nackTargetPeerId = prevTarget;
+                if (!string.IsNullOrEmpty(intent.intentId))
+                    _intentSourcePeer.Remove(intent.intentId);
+            }
+        }
+
+        private void HostAcceptIntentCore(IntentDto intent)
+        {
             if (!string.IsNullOrEmpty(intent.intentId) && !_seenIntentIds.Add(intent.intentId))
             {
                 _log.LogInfo("[Sync] Duplicate intent ignored " + intent.intentId);
+                // Still Nack so Guest clears await (multi-guest: silent drop left Guest stuck 20s).
+                if (_nackGuestOnReject)
+                    SendIntentNack(intent.intentId, "duplicate", null);
                 return;
+            }
+
+            if (_nackGuestOnReject)
+            {
+                if (string.IsNullOrEmpty(_nackTargetPeerId))
+                {
+                    _log.LogWarning("[Sync] Guest Intent missing SourcePeerId — reject");
+                    SendIntentNack(intent.intentId, "no-source-peer", null);
+                    return;
+                }
+                if (!TryValidateGuestPeerOwnsCurrentTurn(_nackTargetPeerId, out var peerErr))
+                {
+                    _log.LogWarning("[Sync] Guest peer not current operator: " + peerErr);
+                    BattleSyncTrace.EvIntent("IntentNack", intent, detail: peerErr);
+                    SendIntentNack(intent.intentId, peerErr, MapNackMessage(peerErr) ?? "");
+                    return;
+                }
             }
 
             string err;
@@ -868,7 +1022,6 @@ namespace AnnW.LanMp.Sync
                     if (ready != null)
                     {
                         ready.sourceIntentId = cmd.sourceIntentId;
-                        TurnAuth?.AttachBoardSnapshot(ready);
                         HostBroadcastCommand(ready);
                     }
                 }
@@ -1023,9 +1176,7 @@ namespace AnnW.LanMp.Sync
                 yield break;
             }
             ready.sourceIntentId = intentCmd.sourceIntentId;
-            // Breathe one tick then snapshot — keep CaptureBoard off the turn-started bus stack.
-            yield return AnnWCoroutine.NextTick;
-            TurnAuth?.AttachBoardSnapshot(ready);
+            // Outbound pump attaches + sends after NextTick (same INV as AI bus EndTurn).
             HostBroadcastCommand(ready);
             BattleSyncTrace.EvCommand("EndTurnAcceptBroadcast", ready);
             _log.LogInfo(
@@ -1034,12 +1185,16 @@ namespace AnnW.LanMp.Sync
 
         private IEnumerator CoHostAcceptAnimated(CommandDto cmd)
         {
-            // Keep Suppress through HostBroadcastCommand so Bus OnUnitActioned cannot emit a twin
-            // Command after Suppress drops (was: Accept broadcast + Bus broadcast → Guest double apply).
+            // Keep Suppress through enqueue so Bus cannot emit a twin while Accept is finishing.
+            // CaptureBoard+TCP run on outbound pump after Suppress drops (no Bus twin from attach).
+            // INV: Host Accept is local sim (Suppress only for emit) — still need presentation stamps
+            // before ExecuteAction so Guest SHIELD_GEN / ATTACK are not fast-skipped on Host
+            // (moveDuration was 0 until HostBroadcastCommand).
             SyncContext.SuppressNetworkEmit = true;
             SyncContext.ApplyingRemoteCommand = true;
             try
             {
+                StampPresentationHints(cmd);
                 yield return CoApplyCommandBody(cmd);
                 if (cmd.kind != "EndTurn")
                     HostBroadcastCommand(cmd);
@@ -1090,6 +1245,34 @@ namespace AnnW.LanMp.Sync
             }
         }
 
+        /// <summary>
+        /// Multi-guest: Intent source peer must own the current human seat (ADR-001).
+        /// </summary>
+        private bool TryValidateGuestPeerOwnsCurrentTurn(string sourcePeerId, out string error)
+        {
+            error = null;
+            var battle = GS_Battle.self;
+            var cur = battle?.cur_player;
+            if (cur == null)
+            {
+                error = "no-player";
+                return false;
+            }
+            if (cur.is_ai)
+            {
+                error = "not-current-player";
+                return false;
+            }
+            var owner = _authority?.GetOwnerPeerIdForSeat(cur.index);
+            if (string.IsNullOrEmpty(owner) ||
+                !string.Equals(owner, sourcePeerId, StringComparison.Ordinal))
+            {
+                error = "not-current-player";
+                return false;
+            }
+            return true;
+        }
+
         private bool TryValidateAgainstBattle(IntentDto intent, out string error)
         {
             var battle = GS_Battle.self;
@@ -1107,8 +1290,11 @@ namespace AnnW.LanMp.Sync
                 var n = 0;
                 try { n = GS_Battle.self?.undo_move?.GetUndoMoveCount() ?? 0; }
                 catch { n = 0; }
-                if (!IntentValidateRules.CanAcceptUndo(n))
+                var actionedOnStack = HostUndoStackContainsActionedUnit();
+                if (!IntentValidateRules.CanAcceptUndo(n, actionedOnStack))
                 {
+                    if (actionedOnStack)
+                        HostClearUndoStack("validate-actioned");
                     error = "nothing-to-undo";
                     return false;
                 }
@@ -1132,10 +1318,27 @@ namespace AnnW.LanMp.Sync
                     error = "already-moved";
                     return false;
                 }
-                if (intent.kind == "DoAction" && unit.actioned)
+                if (intent.kind == "DoAction" &&
+                    IntentValidateRules.IsUnitSpentForIntent(
+                        "DoAction", unit.moved, unit.actioned, intent.actionCate))
                 {
                     error = "already-actioned";
                     return false;
+                }
+
+                // ExecuteAction / DoActionInstant do not re-check UX range — Intent must.
+                if (intent.kind == "DoAction")
+                {
+                    if (!ActionLegality.TryValidateDoAction(
+                            unit, intent.actionCate, intent.hasTarget,
+                            intent.targetX, intent.targetY, out error))
+                        return false;
+                }
+                else if (intent.kind == "UnitMoved")
+                {
+                    if (!ActionLegality.TryValidateUnitMoved(
+                            unit, intent.targetX, intent.targetY, out error))
+                        return false;
                 }
             }
 
@@ -1147,22 +1350,42 @@ namespace AnnW.LanMp.Sync
         {
             if (_net.Role != PeerRole.Host || !_net.IsConnected)
                 return;
+            // Host-local Undo/EndTurn reject must stay Host-only — Guest toast during spectate.
+            if (!_nackGuestOnReject)
+            {
+                _log.LogInfo("[Sync] Host-local Intent reject suppressed (no Nack wire) code=" + (code ?? ""));
+                return;
+            }
             var nack = new IntentNackDto
             {
                 intentId = intentId ?? "",
                 code = code ?? "reject",
                 message = message ?? "操作被拒绝"
             };
-            _net.Send(new Envelope
+            var env = new Envelope
             {
                 Type = MsgType.IntentNack,
                 BattleId = LanMpPlugin.Instance?.Lobby?.BattleId ?? "",
                 PayloadJson = JsonUtil.ToJson(nack)
-            });
+            };
+            if (!string.IsNullOrEmpty(_nackTargetPeerId))
+            {
+                if (!_net.TrySendTo(_nackTargetPeerId, env))
+                    _log.LogWarning("[Sync] IntentNack send failed peer=" + _nackTargetPeerId);
+            }
+            else
+            {
+                // Never broadcast Nack — other Guests would clear await / toast wrongly.
+                _log.LogWarning("[Sync] IntentNack suppressed — no target peer code=" + (code ?? ""));
+            }
         }
 
         private static string MapNackMessage(string code)
         {
+            var legality = ActionLegality.MapUserMessage(code);
+            if (!string.IsNullOrEmpty(legality))
+                return legality;
+
             switch (code)
             {
                 case "already-moved":
@@ -1173,6 +1396,8 @@ namespace AnnW.LanMp.Sync
                     return "没有可撤回的移动";
                 case "not-current-player":
                 case "turn-mismatch":
+                case "duplicate":
+                case "no-source-peer":
                     return null;
                 case "unit-not-owned":
                     return InputGateRules.BlockReasonNotYourUnit;
@@ -1515,6 +1740,7 @@ namespace AnnW.LanMp.Sync
             if (isBuildLike && hasAttach)
             {
                 yield return CoApplyDoActionAttachOnly(cmd, unit, cate, attachEarly, idsBefore, "host-build");
+                HostClearUndoStack("DoAction-host-build");
                 yield break;
             }
 
@@ -1548,12 +1774,16 @@ namespace AnnW.LanMp.Sync
             if (exec != null)
             {
                 yield return exec;
+                // GameController.ExecuteAction does NOT clear undo (unlike UX_Manager.proc_UnitsDoAction).
+                // Without this, Guest can Undo after acting and move/act again (ADR-001).
+                HostClearUndoStack("DoAction-ExecuteAction");
                 _log.LogInfo(
                     $"[Sync] Applied DoAction(animated) unit={cmd.netUnitId} cate={cmd.actionCate} hasTarget={cmd.hasTarget}");
             }
             else
             {
                 ApplyDoActionInstant(cmd);
+                HostClearUndoStack("DoAction-instant-fallback");
             }
 
             TryLookAtUnit(unit);
@@ -1578,16 +1808,23 @@ namespace AnnW.LanMp.Sync
             var tile = ResolveActionTile(cmd);
             var wait = 0f;
             if (!skipAnim)
+            {
                 wait = ActionPresentation.KickDoActionVisual(unit, cate, tile, _log);
-
-            if (wait > 0.001f)
-                yield return wait;
-
-            ActionPresentation.FinishDoActionVisual(unit);
+                if (wait > 0.001f)
+                    yield return wait;
+                // Hit SFX: vanilla plays inside DoAction_* which attach-only skips (INV: presentation only).
+                ActionPresentation.FinishDoActionVisual(unit, cate, tile, _log);
+            }
+            else
+            {
+                ActionPresentation.FinishDoActionVisual(unit);
+            }
 
             ApplyResultAttachment(attachEarly, "DoAction", snapPositions: false);
             ActionPresentation.AfterAttachApply(attachEarly, _log, cmd, idsBefore);
-            EnsureUnitActed(unit);
+            // ADR-001: Host attachment owns actioned/moved (factories may keep acting while bp_left>0).
+            // Never force-spent after attach — that blocked Guest SET_TRAIN_POS / multi-TRAIN.
+            EnsureUnitActedIfAbsentFromAttach(unit, attachEarly);
             ResultAttachmentBridge.RefreshUnactionedLists(_log);
             _log.LogInfo(
                 $"[Sync] Applied DoAction(attach-only/{tag}) unit={cmd.netUnitId} cate={cate} presentWait={wait:0.###}");
@@ -1599,6 +1836,18 @@ namespace AnnW.LanMp.Sync
                 return;
             unit.actioned = true;
             unit.moved = true;
+        }
+
+        /// <summary>
+        /// Fallback only when Host attachment omitted this unit. Otherwise trust stamped actioned/moved.
+        /// </summary>
+        private static void EnsureUnitActedIfAbsentFromAttach(UnitData unit, ResultAttachmentDto attach)
+        {
+            if (unit == null)
+                return;
+            if (attach?.units != null && ResultAttachmentCodec.FindUnit(attach, unit.unit_id) != null)
+                return;
+            EnsureUnitActed(unit);
         }
 
         private static GameTileData ResolveActionTile(CommandDto cmd)
@@ -1801,7 +2050,28 @@ namespace AnnW.LanMp.Sync
                 _log.LogWarning("[Sync] UnitMoved missing unit " + cmd.netUnitId);
                 return;
             }
-            GameAPI.self.MoveUnitInstantly(unit, new Inctor2(cmd.targetX, cmd.targetY));
+            var to = new Inctor2(cmd.targetX, cmd.targetY);
+            // Prefer boarding when landing on a transporter — MoveUnitInstantly alone desyncs cargo.
+            try
+            {
+                var tile = GameAPI.self != null ? GameAPI.self.GetTile(to) : null;
+                var other = tile != null ? tile.GetUnit() : null;
+                if (other != null && other != unit && other.wp_transport != null)
+                {
+                    unit.UnRegPos(null);
+                    other.wp_transport.TransportLoad(unit);
+                    unit.pos = to;
+                    try { unit.Event_UpdatePos?.Invoke(); }
+                    catch { /* ignore */ }
+                    _log.LogInfo($"[Sync] Applied UnitMoved(instant+load) unit={cmd.netUnitId}");
+                    return;
+                }
+            }
+            catch (Exception ex)
+            {
+                _log.LogWarning("[Sync] UnitMoved transport load: " + ex.Message);
+            }
+            GameAPI.self.MoveUnitInstantly(unit, to);
             _log.LogInfo($"[Sync] Applied UnitMoved(instant) unit={cmd.netUnitId}");
         }
 
@@ -1963,13 +2233,74 @@ namespace AnnW.LanMp.Sync
                 $"[Sync] Host undo stack push unit={unit.unit_id} from=({from.x},{from.y}) depth={undo.GetUndoMoveCount()}");
         }
 
+        /// <summary>
+        /// Mirror vanilla UX_Manager.proc_UnitsDoAction: acting clears undo.
+        /// Host Accept uses GameController.ExecuteAction which never clears.
+        /// </summary>
+        private void HostClearUndoStack(string reason)
+        {
+            if (_net.Role != PeerRole.Host)
+                return;
+            try
+            {
+                var undo = GS_Battle.self?.undo_move;
+                if (undo == null)
+                    return;
+                var before = undo.GetUndoMoveCount();
+                if (before <= 0)
+                    return;
+                undo.ClearUndoableMoveList();
+                _log.LogInfo($"[Sync] Cleared undo stack ({reason}) depth {before}→0");
+            }
+            catch (Exception ex)
+            {
+                _log.LogWarning("[Sync] ClearUndo: " + ex.Message);
+            }
+        }
+
+        /// <summary>True if any unit referenced by Host undo batches is already actioned.</summary>
+        private static bool HostUndoStackContainsActionedUnit()
+        {
+            try
+            {
+                var undo = GS_Battle.self?.undo_move;
+                if (undo == null)
+                    return false;
+                var field = AccessTools.Field(typeof(UndoMoveData), "undo_move_batchs");
+                var batches = field?.GetValue(undo) as System.Collections.IList;
+                if (batches == null || batches.Count == 0)
+                    return false;
+                foreach (var batchObj in batches)
+                {
+                    if (!(batchObj is System.Collections.IEnumerable batch))
+                        continue;
+                    foreach (var infoObj in batch)
+                    {
+                        if (infoObj == null)
+                            continue;
+                        var unitField = AccessTools.Field(infoObj.GetType(), "unit")
+                                        ?? AccessTools.Field(infoObj.GetType(), "Unit");
+                        var u = unitField?.GetValue(infoObj) as UnitData;
+                        if (u != null && u.actioned)
+                            return true;
+                    }
+                }
+            }
+            catch { /* ignore */ }
+            return false;
+        }
+
         private void OnEnvelope(Envelope env)
         {
             if (env.Type == MsgType.Intent && _net.Role == PeerRole.Host)
             {
                 var intent = JsonUtil.FromJson<IntentDto>(env.PayloadJson);
                 if (intent != null)
-                    HostAcceptIntent(intent);
+                {
+                    if (!string.IsNullOrEmpty(intent.intentId) && !string.IsNullOrEmpty(env.SourcePeerId))
+                        _intentSourcePeer[intent.intentId] = env.SourcePeerId;
+                    HostAcceptIntent(intent, fromGuestNetwork: true);
+                }
                 return;
             }
 
@@ -1978,12 +2309,15 @@ namespace AnnW.LanMp.Sync
                 var nack = JsonUtil.FromJson<IntentNackDto>(env.PayloadJson);
                 if (nack == null)
                     return;
+                var matchesAwait = !string.IsNullOrEmpty(nack.intentId) &&
+                    string.Equals(nack.intentId, _guestAwaitIntentId, StringComparison.Ordinal);
                 if (!string.IsNullOrEmpty(nack.intentId))
-                {
                     _guestOptimisticDone.Remove(nack.intentId);
-                    if (string.Equals(nack.intentId, _guestAwaitIntentId, StringComparison.Ordinal))
-                        ClearGuestAwait("nack");
-                }
+                if (matchesAwait)
+                    ClearGuestAwait("nack");
+                // Multi-guest: ignore Nacks for other peers' intents.
+                if (!matchesAwait && !string.IsNullOrEmpty(nack.intentId))
+                    return;
                 _log.LogWarning("[Sync] IntentNack: " + (nack.message ?? nack.code));
                 BattleSyncTrace.Ev("IntentNackRecv", kind: nack.code, intentId: nack.intentId, detail: nack.message);
                 OnIntentNack?.Invoke(nack);

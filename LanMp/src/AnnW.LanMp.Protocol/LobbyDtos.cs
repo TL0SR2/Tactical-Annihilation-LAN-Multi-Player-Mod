@@ -23,7 +23,7 @@ namespace AnnW.LanMp.Protocol
         BattleStarted = 2,
         RoomFull = 3,
         NoHumanSlot = 4,
-        /// <summary>Phase A: already have one guest TCP.</summary>
+        /// <summary>Legacy Phase A; Phase B uses NoHumanSlot / RoomFull.</summary>
         GuestSlotTaken = 5
     }
 
@@ -55,6 +55,16 @@ namespace AnnW.LanMp.Protocol
         public string coId = "";
         /// <summary>Human occupant display name; empty for AI / standby.</summary>
         public string occupantName = "";
+        /// <summary>
+        /// Economy multiplier stamped to SGS_Player.res_percent (Host-authoritative).
+        /// Human: applied when &gt; 0. Custom AI: always. Preset AI: display + kept if Host switches to Custom.
+        /// </summary>
+        public float resPercent = 1f;
+        /// <summary>
+        /// Custom AI intelligence stamped to SGS_Player.ai_interlligence (Host-authoritative).
+        /// Meaningful for Custom AI; preset AI seats store matching GetAIDiffIntelligence.
+        /// </summary>
+        public float aiIntelligence = 0.7f;
     }
 
     public class LobbyDraftDto
@@ -122,6 +132,10 @@ namespace AnnW.LanMp.Protocol
         public int pos;
         public bool setCoId;
         public string coId = "";
+        public bool setResPercent;
+        public float resPercent;
+        public bool setAiIntelligence;
+        public float aiIntelligence;
     }
 
     public class SeatEditNack

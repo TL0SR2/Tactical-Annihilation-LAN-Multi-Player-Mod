@@ -1,26 +1,48 @@
 using System;
+using System.Collections.Generic;
 
 namespace AnnW.LanMp.Protocol
 {
-    /// <summary>M01 lobby — no scene load.</summary>
+    /// <summary>M01 lobby — Phase B multi-guest TCP.</summary>
     public sealed class LobbySession
     {
         private readonly NetSession _net;
         private readonly ILanLogger _log;
+        private readonly Dictionary<string, bool> _peerReady = new Dictionary<string, bool>();
 
         public LobbyDraftDto Draft { get; private set; } = new LobbyDraftDto();
         public bool LocalReady { get; private set; }
-        public bool RemoteReady { get; private set; }
+
+        /// <summary>Compat: any remote HumanSeated peer is ready (AND of remotes).</summary>
+        public bool RemoteReady
+        {
+            get
+            {
+                if (Draft?.seats == null)
+                    return false;
+                var any = false;
+                foreach (var s in Draft.seats)
+                {
+                    if (LobbySeatLogic.GetState(s) != LobbySeatState.HumanSeated)
+                        continue;
+                    var peer = s?.peerId;
+                    if (string.IsNullOrEmpty(peer) || peer == _net.LocalPeerId)
+                        continue;
+                    any = true;
+                    if (!IsPeerReady(peer))
+                        return false;
+                }
+                return any;
+            }
+        }
+
         public bool CanStart { get; private set; }
         public string BattleId { get; private set; }
         public int BattleSeed { get; private set; }
         public bool StartAuthorized { get; private set; }
         public LobbyRejectPayload LastReject { get; private set; }
 
-        /// <summary>Optional CO name pool for Bake (Host fills from game data).</summary>
-        public Func<System.Collections.Generic.IList<string>> CoPoolProvider { get; set; }
-
-        /// <summary>True while Host considers battle start armed (blocks joins).</summary>
+        public Func<IList<string>> CoPoolProvider { get; set; }
         public Func<bool> IsBattleStartedGate { get; set; }
 
         public event Action OnDraftChanged;
@@ -36,10 +58,20 @@ namespace AnnW.LanMp.Protocol
             _log = log ?? NullLanLogger.Instance;
         }
 
+        public bool IsPeerReady(string peerId)
+        {
+            if (string.IsNullOrEmpty(peerId))
+                return false;
+            if (peerId == _net.LocalPeerId)
+                return LocalReady;
+            return _peerReady.TryGetValue(peerId, out var r) && r;
+        }
+
         public void Start()
         {
             _net.Subscribe(OnEnvelope);
             _net.OnDisconnected += OnNetDisconnected;
+            _net.OnPeerDisconnected += OnPeerDisconnected;
             _net.AdmitGuest = TryAdmitGuest;
             _net.OnGuestAdmitted = OnGuestAdmitted;
         }
@@ -64,7 +96,6 @@ namespace AnnW.LanMp.Protocol
             }
         }
 
-        /// <summary>Host re-sends current Draft after a guest connects (may be empty map).</summary>
         public void RepublishCurrentDraftIfHost()
         {
             if (_net.Role != PeerRole.Host)
@@ -76,7 +107,6 @@ namespace AnnW.LanMp.Protocol
         {
             if (_net.Role == PeerRole.None)
                 return;
-            // Host may ready alone (no guest). Guest needs connection.
             if (_net.Role == PeerRole.Guest && !_net.IsConnected)
                 return;
             if (string.IsNullOrEmpty(Draft.mapId))
@@ -92,10 +122,11 @@ namespace AnnW.LanMp.Protocol
             }
 
             LocalReady = ready;
+            SetPeerReadyMap(_net.LocalPeerId, ready);
             OnReadyChanged?.Invoke();
-            if (_net.IsConnected)
+            if (_net.IsConnected || _net.Role == PeerRole.Host)
             {
-                _net.Send(new Envelope
+                var env = new Envelope
                 {
                     Type = MsgType.LobbyReady,
                     PayloadJson = JsonUtil.ToJson(new ReadyPayload
@@ -103,7 +134,11 @@ namespace AnnW.LanMp.Protocol
                         peerId = _net.LocalPeerId,
                         ready = ready
                     })
-                });
+                };
+                if (_net.Role == PeerRole.Host)
+                    _net.TryBroadcast(env);
+                else
+                    _net.Send(env);
             }
             RecomputeCanStart();
         }
@@ -164,12 +199,19 @@ namespace AnnW.LanMp.Protocol
             };
             if (_net.IsConnected)
             {
-                _net.Send(new Envelope
+                var ok = _net.TryBroadcast(new Envelope
                 {
                     Type = MsgType.LobbyStart,
                     BattleId = BattleId,
                     PayloadJson = JsonUtil.ToJson(payload)
                 });
+                if (!ok)
+                {
+                    StartAuthorized = false;
+                    BattleId = null;
+                    _log.Error("[Lobby] LobbyStart broadcast failed — aborting start");
+                    throw new InvalidOperationException("LobbyStart broadcast failed");
+                }
             }
             _log.Info($"[Lobby] LobbyStart battleId={BattleId} seed={BattleSeed}");
             OnLobbyStart?.Invoke(payload);
@@ -185,16 +227,6 @@ namespace AnnW.LanMp.Protocol
                     LobbySeatLogic.CountSeatedHumans(Draft) + LobbySeatLogic.CountJoinable(Draft),
                     LobbySeatLogic.CountSeatedHumans(Draft),
                     LobbySeatLogic.CountJoinable(Draft));
-
-            // Phase A: one guest TCP only (NetSession already blocks second stream, but Hello path may race).
-            if (_net.IsConnected && !string.IsNullOrEmpty(_net.RemotePeerId)
-                && _net.RemotePeerId != hello?.peerId)
-            {
-                return MakeReject(LobbyRejectCode.GuestSlotTaken,
-                    LobbySeatLogic.CountSeatedHumans(Draft) + LobbySeatLogic.CountJoinable(Draft),
-                    LobbySeatLogic.CountSeatedHumans(Draft),
-                    LobbySeatLogic.CountJoinable(Draft));
-            }
 
             var joinable = LobbySeatLogic.CountJoinable(Draft);
             if (joinable <= 0)
@@ -217,9 +249,6 @@ namespace AnnW.LanMp.Protocol
                 _log.Warn("[Lobby] Admit ok but seat failed: " + err);
                 return;
             }
-            Draft.guestPeerId = hello.peerId;
-            Draft.guestDisplayName = hello.displayName ?? "";
-            Draft.guestSlotIndex = idx;
             SyncSlotIndicesFromSeats();
             ClearAllReady();
             OnDraftChanged?.Invoke();
@@ -228,30 +257,37 @@ namespace AnnW.LanMp.Protocol
             _log.Info($"[Lobby] Guest seated seat={idx} peer={hello.peerId}");
         }
 
+        private void OnPeerDisconnected(string peerId, string reason)
+        {
+            if (_net.Role != PeerRole.Host)
+                return;
+            if (string.IsNullOrEmpty(peerId))
+                return;
+            // Mid-battle: Authority aborts the match — do not mutate draft / BroadcastDraft
+            // to remaining Guests (would race MatchAbort and desync lobby lights).
+            if (!string.IsNullOrEmpty(BattleId) || StartAuthorized)
+            {
+                _log.Info("[Lobby] Peer left mid-battle — seat release deferred peer=" + peerId);
+                return;
+            }
+            if (!LobbySeatLogic.TryReleaseHuman(Draft, peerId, out _))
+                return;
+            _peerReady.Remove(peerId);
+            SyncSlotIndicesFromSeats();
+            ClearAllReady();
+            OnDraftChanged?.Invoke();
+            if (_net.IsConnected)
+                BroadcastDraft();
+            RecomputeCanStart();
+            _log.Info("[Lobby] Peer left seat released peer=" + peerId + " reason=" + reason);
+        }
+
         private void OnNetDisconnected(string reason)
         {
-            if (_net.Role == PeerRole.Host && !string.IsNullOrEmpty(Draft?.guestPeerId))
-            {
-                if (LobbySeatLogic.TryReleaseHuman(Draft, Draft.guestPeerId, out _))
-                {
-                    Draft.guestPeerId = null;
-                    Draft.guestDisplayName = "";
-                    Draft.guestSlotIndex = -1;
-                    SyncSlotIndicesFromSeats();
-                    ClearAllReady();
-                    OnDraftChanged?.Invoke();
-                    RecomputeCanStart();
-                }
-            }
-            else if (_net.Role != PeerRole.Host)
-            {
-                // Guest session ended: wipe ready/battle; keep last draft mirror until new join.
-                ResetSessionState();
-            }
-            else
-            {
-                ResetSessionState();
-            }
+            // Host peer drops handled by OnPeerDisconnected (seat release).
+            if (_net.Role == PeerRole.Host)
+                return;
+            ResetSessionState();
         }
 
         private void ApplySeatEditAsHost(SeatEditRequest req)
@@ -269,7 +305,6 @@ namespace AnnW.LanMp.Protocol
                 });
                 return;
             }
-            // Preference edit: clear only editor ready; structural: clear all.
             if (req.setState)
                 ClearAllReady();
             else
@@ -297,7 +332,6 @@ namespace AnnW.LanMp.Protocol
                     if (_net.Role == PeerRole.Guest)
                     {
                         Draft = JsonUtil.FromJson<LobbyDraftDto>(env.PayloadJson) ?? new LobbyDraftDto();
-                        // Ready is synced only via LobbyReady — never wipe Host ready mirror on every draft.
                         OnDraftChanged?.Invoke();
                         _log.Info("[Lobby] Draft received map=" + Draft.mapId);
                     }
@@ -309,12 +343,19 @@ namespace AnnW.LanMp.Protocol
                     var req = JsonUtil.FromJson<SeatEditRequest>(env.PayloadJson);
                     if (req == null)
                         break;
+                    // Multi-guest: never trust payload peerId — stamp from TCP source.
+                    if (string.IsNullOrEmpty(env.SourcePeerId))
+                    {
+                        _log.Warn("[Lobby] SeatEdit ignored — missing SourcePeerId");
+                        break;
+                    }
+                    req.peerId = env.SourcePeerId;
                     var ok = LobbySeatLogic.TryApplyEdit(
                         Draft, req, asHost: false, editorPeerId: req.peerId,
                         out var nack, out var msg);
                     if (!ok)
                     {
-                        _net.Send(new Envelope
+                        var nackEnv = new Envelope
                         {
                             Type = MsgType.SeatEditNack,
                             PayloadJson = JsonUtil.ToJson(new SeatEditNack
@@ -323,7 +364,8 @@ namespace AnnW.LanMp.Protocol
                                 code = (int)nack,
                                 message = msg
                             })
-                        });
+                        };
+                        _net.TrySendTo(req.peerId, nackEnv);
                         break;
                     }
                     ClearPeerReady(req.peerId);
@@ -345,10 +387,26 @@ namespace AnnW.LanMp.Protocol
                     var p = JsonUtil.FromJson<ReadyPayload>(env.PayloadJson);
                     if (p == null)
                         return;
+                    // Host: identity from TCP only (blocks forged Ready for other peers).
+                    if (_net.Role == PeerRole.Host)
+                    {
+                        if (string.IsNullOrEmpty(env.SourcePeerId))
+                            return;
+                        p.peerId = env.SourcePeerId;
+                    }
                     if (p.peerId == _net.LocalPeerId)
                         LocalReady = p.ready;
-                    else
-                        RemoteReady = p.ready;
+                    SetPeerReadyMap(p.peerId, p.ready);
+                    // Host mirrors Ready to all other guests so everyone sees lights.
+                    if (_net.Role == PeerRole.Host && _net.IsConnected &&
+                        !string.IsNullOrEmpty(p.peerId) && p.peerId != _net.LocalPeerId)
+                    {
+                        _net.TryBroadcast(new Envelope
+                        {
+                            Type = MsgType.LobbyReady,
+                            PayloadJson = JsonUtil.ToJson(p)
+                        });
+                    }
                     OnReadyChanged?.Invoke();
                     RecomputeCanStart();
                     break;
@@ -378,7 +436,7 @@ namespace AnnW.LanMp.Protocol
 
         private void BroadcastDraft()
         {
-            _net.Send(new Envelope
+            _net.TryBroadcast(new Envelope
             {
                 Type = MsgType.LobbyDraft,
                 PayloadJson = JsonUtil.ToJson(Draft)
@@ -400,7 +458,7 @@ namespace AnnW.LanMp.Protocol
             OnCanStartChanged?.Invoke();
             if (_net.IsConnected)
             {
-                _net.Send(new Envelope
+                _net.TryBroadcast(new Envelope
                 {
                     Type = MsgType.LobbyCanStart,
                     PayloadJson = JsonUtil.ToJson(new CanStartPayload { canStart = CanStart })
@@ -422,16 +480,8 @@ namespace AnnW.LanMp.Protocol
                 var peer = s.peerId;
                 if (string.IsNullOrEmpty(peer))
                     return false;
-                if (peer == _net.LocalPeerId)
-                {
-                    if (!LocalReady)
-                        return false;
-                }
-                else
-                {
-                    if (!RemoteReady)
-                        return false;
-                }
+                if (!IsPeerReady(peer))
+                    return false;
             }
             return any;
         }
@@ -443,41 +493,45 @@ namespace AnnW.LanMp.Protocol
             Draft.hostSlotIndex = LobbySeatLogic.FindSeatIndexByPeer(Draft, Draft.hostPeerId);
             if (Draft.hostSlotIndex < 0)
                 Draft.hostSlotIndex = LobbySeatLogic.FindSeatIndexByPeer(Draft, _net.LocalPeerId);
-            Draft.guestSlotIndex = string.IsNullOrEmpty(Draft.guestPeerId)
-                ? -1
-                : LobbySeatLogic.FindSeatIndexByPeer(Draft, Draft.guestPeerId);
+            LobbySeatLogic.RefreshLegacyGuestFields(Draft);
         }
 
         private void ClearAllReady()
         {
             LocalReady = false;
-            RemoteReady = false;
+            _peerReady.Clear();
             CanStart = false;
             StartAuthorized = false;
             OnReadyChanged?.Invoke();
             OnCanStartChanged?.Invoke();
             BroadcastReadyState(_net.LocalPeerId, false);
-            if (!string.IsNullOrEmpty(_net.RemotePeerId))
-                BroadcastReadyState(_net.RemotePeerId, false);
+            foreach (var id in _net.GetConnectedPeerIds())
+                BroadcastReadyState(id, false);
         }
 
         private void ClearPeerReady(string peerId)
         {
             if (peerId == _net.LocalPeerId)
                 LocalReady = false;
-            else
-                RemoteReady = false;
+            SetPeerReadyMap(peerId, false);
             CanStart = false;
             OnReadyChanged?.Invoke();
             OnCanStartChanged?.Invoke();
             BroadcastReadyState(peerId, false);
         }
 
+        private void SetPeerReadyMap(string peerId, bool ready)
+        {
+            if (string.IsNullOrEmpty(peerId) || peerId == _net.LocalPeerId)
+                return;
+            _peerReady[peerId] = ready;
+        }
+
         private void BroadcastReadyState(string peerId, bool ready)
         {
             if (_net.Role != PeerRole.Host || !_net.IsConnected || string.IsNullOrEmpty(peerId))
                 return;
-            _net.Send(new Envelope
+            _net.TryBroadcast(new Envelope
             {
                 Type = MsgType.LobbyReady,
                 PayloadJson = JsonUtil.ToJson(new ReadyPayload
@@ -491,7 +545,7 @@ namespace AnnW.LanMp.Protocol
         private void ResetSessionState()
         {
             LocalReady = false;
-            RemoteReady = false;
+            _peerReady.Clear();
             CanStart = false;
             StartAuthorized = false;
             BattleId = null;
@@ -499,20 +553,53 @@ namespace AnnW.LanMp.Protocol
             OnCanStartChanged?.Invoke();
         }
 
-        /// <summary>Clear start/battle tokens without wiping seat draft (MatchAbort / rematch).</summary>
         public void ClearBattleAuthorization()
         {
             StartAuthorized = false;
             BattleId = null;
             LocalReady = false;
-            RemoteReady = false;
+            _peerReady.Clear();
             CanStart = false;
             OnReadyChanged?.Invoke();
             OnCanStartChanged?.Invoke();
             RecomputeCanStart();
         }
 
-        /// <summary>After guest leave or rematch: ensure draft seat labels are clean and UI rebuilds.</summary>
+        /// <summary>
+        /// After MatchAbort drops peers: release HumanSeated seats whose TCP is gone
+        /// so Host lobby does not keep ghost occupants.
+        /// </summary>
+        public void ReleaseSeatsForDisconnectedPeers()
+        {
+            if (_net.Role != PeerRole.Host || Draft?.seats == null)
+                return;
+            var live = new HashSet<string>(_net.GetConnectedPeerIds() ?? Array.Empty<string>());
+            var toRelease = new List<string>();
+            foreach (var s in Draft.seats)
+            {
+                if (s == null || LobbySeatLogic.GetState(s) != LobbySeatState.HumanSeated)
+                    continue;
+                if (string.IsNullOrEmpty(s.peerId) || s.peerId == _net.LocalPeerId)
+                    continue;
+                if (!live.Contains(s.peerId))
+                    toRelease.Add(s.peerId);
+            }
+            if (toRelease.Count == 0)
+                return;
+            foreach (var peerId in toRelease)
+            {
+                if (LobbySeatLogic.TryReleaseHuman(Draft, peerId, out _))
+                    _peerReady.Remove(peerId);
+            }
+            SyncSlotIndicesFromSeats();
+            ClearAllReady();
+            OnDraftChanged?.Invoke();
+            if (_net.IsConnected)
+                BroadcastDraft();
+            RecomputeCanStart();
+            _log.Info("[Lobby] Released seats for disconnected peers after abort count=" + toRelease.Count);
+        }
+
         public void NotifyDraftUiRefresh()
         {
             OnDraftChanged?.Invoke();

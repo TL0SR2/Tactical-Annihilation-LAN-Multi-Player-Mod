@@ -43,11 +43,16 @@ namespace AnnW.LanMp.Protocol
         public string BattleId = "";
         public uint Seq;
         public string PayloadJson = "{}";
+        /// <summary>
+        /// Host-only: filled after decode with the admitted peer that sent this frame.
+        /// Not required on the wire from Guest; ignored by Guest handlers.
+        /// </summary>
+        public string SourcePeerId;
     }
 
     public static class WireCodec
     {
-        public const ushort ProtocolVersion = 3;
+        public const ushort ProtocolVersion = 4;
 
         public static byte[] EncodeFrame(Envelope env)
         {

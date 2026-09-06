@@ -177,13 +177,16 @@ namespace AnnW.LanMp.Patches
         {
             var battle = GS_Battle.self;
             var cur = battle?.cur_player;
+            var defeated = LanMpPlugin.Instance?.Authority != null &&
+                           LanMpPlugin.Instance.Authority.IsLocalHumanDefeated();
+            var prefix = defeated ? "已战败·观战" : "观战回合";
             if (cur == null)
-                return "观战回合";
+                return prefix;
 
             var name = ResolveOperatorName(cur);
             if (cur.is_ai)
-                return "观战回合，当前操作者：" + name + "（AI）";
-            return "观战回合，当前操作者：" + name;
+                return prefix + "，当前操作者：" + name + "（AI）";
+            return prefix + "，当前操作者：" + name;
         }
 
         private static string ResolveOperatorName(Player cur)
@@ -195,13 +198,11 @@ namespace AnnW.LanMp.Patches
                 var seat = draft.seats[cur.index];
                 if (seat != null && !string.IsNullOrWhiteSpace(seat.occupantName))
                     return seat.occupantName.Trim();
-                if (seat != null && !string.IsNullOrEmpty(seat.peerId))
-                {
-                    if (seat.peerId == draft.hostPeerId && !string.IsNullOrWhiteSpace(draft.hostDisplayName))
-                        return draft.hostDisplayName.Trim();
-                    if (seat.peerId == draft.guestPeerId && !string.IsNullOrWhiteSpace(draft.guestDisplayName))
-                        return draft.guestDisplayName.Trim();
-                }
+                if (seat != null
+                    && !string.IsNullOrEmpty(seat.peerId)
+                    && seat.peerId == draft.hostPeerId
+                    && !string.IsNullOrWhiteSpace(draft.hostDisplayName))
+                    return draft.hostDisplayName.Trim();
             }
 
             try

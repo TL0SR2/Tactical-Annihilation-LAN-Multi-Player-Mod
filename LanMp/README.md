@@ -2,7 +2,7 @@
 
 遭遇战局域网联机插件源码（设计见 `../docs/lan-mp/`）。
 
-当前版本：**0.16.12**（`Plugin.cs` → `PluginVersion`）。
+当前版本：**0.18.2**（`Plugin.cs` → `PluginVersion`）。
 
 ## 版本管理（Git）
 

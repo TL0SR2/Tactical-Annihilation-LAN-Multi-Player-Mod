@@ -19,7 +19,7 @@ namespace AnnW.LanMp.Patches
                 var plugin = LanMpPlugin.Instance;
                 if (plugin == null || !plugin.Enabled.Value)
                     return;
-                if (plugin.Authority == null || !plugin.Authority.InLanBattle)
+                if (plugin.Authority == null || !plugin.Authority.InLanBattle || plugin.Authority.MatchSettled)
                     return;
                 plugin.Authority.NotifyLeavingBattle("quit-out");
             }
@@ -36,7 +36,7 @@ namespace AnnW.LanMp.Patches
                 if (plugin == null || !plugin.Enabled.Value)
                     return;
                 // DoQuitOut already notified; LeaveGame alone still needs a signal.
-                if (plugin.Authority == null || !plugin.Authority.InLanBattle)
+                if (plugin.Authority == null || !plugin.Authority.InLanBattle || plugin.Authority.MatchSettled)
                     return;
                 plugin.Authority.NotifyLeavingBattle("leave-game");
             }

@@ -71,18 +71,41 @@ namespace AnnW.LanMp.Protocol
             return true;
         }
 
-        /// <summary>Mirror Host spent-unit checks — block duplicate Guest Intent before send.</summary>
-        public static bool IsUnitSpentForIntent(string kind, bool moved, bool actioned)
+        /// <summary>Vanilla ActionCate.SET_TRAIN_POS — factory rally; UX allows when AlwaysCanDo.</summary>
+        public const int ActionCateSetTrainPos = 15;
+
+        /// <summary>
+        /// Mirror Host spent-unit checks — block duplicate Guest Intent before send.
+        /// SET_TRAIN_POS is not "spent" by actioned (vanilla AlwaysCanDo / multi-TRAIN rally).
+        /// </summary>
+        public static bool IsUnitSpentForIntent(string kind, bool moved, bool actioned, int actionCate = -1)
         {
             if (kind == "UnitMoved")
                 return moved;
             if (kind == "DoAction")
+            {
+                if (actionCate == ActionCateSetTrainPos)
+                    return false;
                 return actioned;
+            }
             return false;
         }
 
         /// <summary>Host must have an undo batch before Accepting Undo Intent.</summary>
         public static bool CanAcceptUndo(int hostUndoStackDepth) =>
             hostUndoStackDepth > 0;
+
+        /// <summary>
+        /// Vanilla clears the undo stack when a unit acts (UX_Manager.proc_UnitsDoAction).
+        /// If the stack still references an actioned unit, Undo must be rejected.
+        /// </summary>
+        public static bool CanAcceptUndo(int hostUndoStackDepth, bool stackContainsActionedUnit)
+        {
+            if (hostUndoStackDepth <= 0)
+                return false;
+            if (stackContainsActionedUnit)
+                return false;
+            return true;
+        }
     }
 }

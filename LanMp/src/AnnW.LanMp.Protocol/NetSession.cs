@@ -8,50 +8,131 @@ using System.Threading;
 
 namespace AnnW.LanMp.Protocol
 {
+    /// <summary>
+    /// Phase B: Host may hold N guest TCP peers; Guest still has one link to Host.
+    /// </summary>
     public sealed class NetSession
     {
         public const ushort ProtocolVersion = WireCodec.ProtocolVersion;
 
+        private sealed class PeerConn
+        {
+            public string ConnKey;
+            public string PeerId;
+            public string DisplayName = "";
+            public TcpClient Client;
+            public NetworkStream Stream;
+            public Thread ReadThread;
+            public long LastRecvTickMs;
+            public bool AwaitingHello;
+            public bool Admitted;
+            /// <summary>True after DropPeerKeepHosting claimed this conn (idempotent / supersede-safe).</summary>
+            public volatile bool Dropped;
+        }
+
         private readonly ILanLogger _log;
         private readonly ConcurrentQueue<Envelope> _incoming = new ConcurrentQueue<Envelope>();
-        private readonly ConcurrentQueue<Envelope> _pendingHostHellos = new ConcurrentQueue<Envelope>();
+        private readonly ConcurrentQueue<PendingHello> _pendingHostHellos = new ConcurrentQueue<PendingHello>();
         private readonly ConcurrentQueue<Action> _mainThreadActions = new ConcurrentQueue<Action>();
         private readonly List<Action<Envelope>> _handlers = new List<Action<Envelope>>();
-        private readonly object _sendLock = new object();
-        private readonly object _clientLock = new object();
+        private readonly object _peersLock = new object();
+        private readonly Dictionary<string, PeerConn> _peersByConn = new Dictionary<string, PeerConn>();
+        private readonly Dictionary<string, PeerConn> _peersByPeerId = new Dictionary<string, PeerConn>();
+        private readonly object _seqLock = new object();
 
         private TcpListener _listener;
-        private TcpClient _client;
-        private NetworkStream _stream;
         private Thread _acceptThread;
-        private Thread _readThread;
         private volatile bool _running;
         private uint _nextSeq = 1;
         private float _heartbeatTimer;
-        private long _lastRecvTickMs;
         private readonly string _localPeerId;
         private volatile bool _welcomeReceived;
-        private volatile bool _hostAwaitingHello;
-        /// <summary>Milliseconds without any inbound frame before treating the peer as dead.</summary>
-        private const int HeartbeatTimeoutMs = 8000;
+        private PeerConn _guestLink;
+        // Host CaptureBoard / AI skip bursts can stall the main thread for many seconds;
+        // 8s idle kill dropped Guests mid-hitch and looked like "Intent never arrived".
+        private const int HeartbeatTimeoutMs = 30000;
+
+        private struct PendingHello
+        {
+            public string ConnKey;
+            public Envelope Env;
+        }
 
         public PeerRole Role { get; private set; } = PeerRole.None;
-        public bool IsConnected => _stream != null && _client != null && _client.Connected &&
-                                   (Role != PeerRole.Guest || _welcomeReceived);
+
+        /// <summary>Host: any admitted guest connected. Guest: Welcome received.</summary>
+        public bool IsConnected
+        {
+            get
+            {
+                if (Role == PeerRole.Guest)
+                    return _guestLink != null && IsPeerLive(_guestLink) && _welcomeReceived;
+                if (Role != PeerRole.Host)
+                    return false;
+                lock (_peersLock)
+                {
+                    foreach (var p in _peersByPeerId.Values)
+                    {
+                        if (IsPeerLive(p))
+                            return true;
+                    }
+                    return false;
+                }
+            }
+        }
+
         public string LocalPeerId => _localPeerId;
-        public string RemotePeerId { get; private set; }
+
+        /// <summary>Compat: first admitted remote peer id (Host) or Host id (Guest).</summary>
+        public string RemotePeerId
+        {
+            get
+            {
+                if (Role == PeerRole.Guest)
+                    return _guestLink != null && _welcomeReceived ? _guestHostPeerId : null;
+                lock (_peersLock)
+                {
+                    foreach (var kv in _peersByPeerId)
+                    {
+                        if (IsPeerLive(kv.Value))
+                            return kv.Key;
+                    }
+                }
+                return null;
+            }
+        }
+
+        private string _guestHostPeerId;
+        private string _guestHostDisplayName = "";
+
         public string LocalDisplayName { get; set; } = "";
-        public string RemoteDisplayName { get; private set; } = "";
+
+        public string RemoteDisplayName
+        {
+            get
+            {
+                if (Role == PeerRole.Guest)
+                    return _guestHostDisplayName ?? "";
+                var id = RemotePeerId;
+                if (string.IsNullOrEmpty(id))
+                    return "";
+                lock (_peersLock)
+                {
+                    return _peersByPeerId.TryGetValue(id, out var p) ? (p.DisplayName ?? "") : "";
+                }
+            }
+        }
+
         public LobbyRejectPayload LastReject { get; private set; }
 
-        /// <summary>Host: return reject payload to deny, or null to admit.</summary>
         public Func<HelloPayload, LobbyRejectPayload> AdmitGuest { get; set; }
-
-        /// <summary>Host: after admit + Welcome, before handlers see Hello.</summary>
         public Action<HelloPayload> OnGuestAdmitted { get; set; }
 
         public event Action OnConnected;
+        /// <summary>Guest full disconnect, or Host when a peer is dropped (compat). Prefer OnPeerDisconnected on Host.</summary>
         public event Action<string> OnDisconnected;
+        /// <summary>Host: one admitted guest TCP closed; peerId may be empty if Hello never completed.</summary>
+        public event Action<string, string> OnPeerDisconnected;
         public event Action<LobbyRejectPayload> OnLobbyRejected;
 
         public NetSession(ILanLogger log, string peerId = null)
@@ -60,6 +141,34 @@ namespace AnnW.LanMp.Protocol
             _localPeerId = string.IsNullOrEmpty(peerId)
                 ? Guid.NewGuid().ToString("N").Substring(0, 8)
                 : peerId;
+        }
+
+        public IReadOnlyList<string> GetConnectedPeerIds()
+        {
+            var list = new List<string>();
+            lock (_peersLock)
+            {
+                foreach (var kv in _peersByPeerId)
+                {
+                    if (IsPeerLive(kv.Value))
+                        list.Add(kv.Key);
+                }
+            }
+            return list;
+        }
+
+        public int ConnectedPeerCount => GetConnectedPeerIds().Count;
+
+        public string GetPeerDisplayName(string peerId)
+        {
+            if (string.IsNullOrEmpty(peerId))
+                return "";
+            lock (_peersLock)
+            {
+                if (_peersByPeerId.TryGetValue(peerId, out var p))
+                    return p.DisplayName ?? "";
+            }
+            return "";
         }
 
         public void Subscribe(Action<Envelope> handler) => _handlers.Add(handler);
@@ -72,15 +181,11 @@ namespace AnnW.LanMp.Protocol
                 catch (Exception ex) { _log.Error("[Net] mainThread action: " + ex); }
             }
 
-            // Host Hello/Admit must run on the Unity/main thread (mutates Lobby.Draft).
-            while (_pendingHostHellos.TryDequeue(out var helloEnv))
+            while (_pendingHostHellos.TryDequeue(out var pending))
             {
                 try
                 {
-                    if (!HandleHostHello(helloEnv))
-                    {
-                        // Reject already dropped the guest stream; keep hosting.
-                    }
+                    HandleHostHello(pending.ConnKey, pending.Env);
                 }
                 catch (Exception ex)
                 {
@@ -90,12 +195,18 @@ namespace AnnW.LanMp.Protocol
 
             while (_incoming.TryDequeue(out var env))
             {
-                NoteRecv();
+                NoteRecvForSource(env.SourcePeerId);
                 if (env.Type == MsgType.Ping)
                 {
                     try
                     {
-                        if (!TrySend(new Envelope { Type = MsgType.Pong, BattleId = env.BattleId, PayloadJson = "{}" }))
+                        var pong = new Envelope { Type = MsgType.Pong, BattleId = env.BattleId, PayloadJson = "{}" };
+                        if (Role == PeerRole.Host && !string.IsNullOrEmpty(env.SourcePeerId))
+                        {
+                            if (!TrySendTo(env.SourcePeerId, pong))
+                                _log.Warn("[Net] Pong send failed peer=" + env.SourcePeerId);
+                        }
+                        else if (!TrySend(pong))
                             _log.Warn("[Net] Pong send failed");
                     }
                     catch (Exception ex)
@@ -112,10 +223,10 @@ namespace AnnW.LanMp.Protocol
                     try
                     {
                         var w = JsonUtil.FromJson<WelcomePayload>(env.PayloadJson);
-                        RemotePeerId = w.peerId;
-                        RemoteDisplayName = w.displayName ?? "";
+                        _guestHostPeerId = w.peerId;
+                        _guestHostDisplayName = w.displayName ?? "";
                         _welcomeReceived = true;
-                        _log.Info("[Net] Welcome from peer=" + RemotePeerId + " name=" + RemoteDisplayName);
+                        _log.Info("[Net] Welcome from peer=" + _guestHostPeerId + " name=" + _guestHostDisplayName);
                         OnConnected?.Invoke();
                     }
                     catch { /* ignore */ }
@@ -144,51 +255,127 @@ namespace AnnW.LanMp.Protocol
 
         public void Tick(float dt)
         {
-            if (!IsConnected)
+            if (Role == PeerRole.None)
                 return;
-            _heartbeatTimer += dt;
-            if (_heartbeatTimer >= 2f)
+
+            if (Role == PeerRole.Guest)
             {
-                _heartbeatTimer = 0f;
-                try
+                if (!IsConnected)
+                    return;
+                _heartbeatTimer += dt;
+                if (_heartbeatTimer >= 2f)
                 {
-                    if (!TrySend(new Envelope { Type = MsgType.Ping, PayloadJson = "{}" }))
+                    _heartbeatTimer = 0f;
+                    try
                     {
-                        ForceDropPeer("heartbeat-send-fail");
+                        if (!TrySend(new Envelope { Type = MsgType.Ping, PayloadJson = "{}" }))
+                        {
+                            ForceDropPeer(null, "heartbeat-send-fail");
+                            return;
+                        }
+                    }
+                    catch
+                    {
+                        ForceDropPeer(null, "heartbeat-send-fail");
                         return;
                     }
                 }
-                catch
-                {
-                    ForceDropPeer("heartbeat-send-fail");
-                    return;
-                }
+                CheckIdle(_guestLink, null);
+                return;
             }
 
-            // Safety net when TCP half-closes without EOF waking ReadLoop promptly.
-            if (_lastRecvTickMs > 0)
+            // Host: ping all admitted peers; drop idle ones.
+            _heartbeatTimer += dt;
+            List<PeerConn> snapshot;
+            lock (_peersLock)
             {
-                var idle = Environment.TickCount - _lastRecvTickMs;
-                if (idle < 0) idle = HeartbeatTimeoutMs + 1; // TickCount wrap
-                if (idle > HeartbeatTimeoutMs)
+                snapshot = new List<PeerConn>(_peersByConn.Values);
+            }
+
+            var doPing = false;
+            if (_heartbeatTimer >= 2f)
+            {
+                _heartbeatTimer = 0f;
+                doPing = true;
+            }
+
+            foreach (var peer in snapshot)
+            {
+                if (!peer.Admitted || !IsPeerLive(peer))
+                    continue;
+                if (doPing)
                 {
-                    _log.Warn("[Net] Heartbeat timeout — dropping peer");
-                    ForceDropPeer("heartbeat-timeout");
+                    try
+                    {
+                        if (!TrySendToConn(peer, new Envelope { Type = MsgType.Ping, PayloadJson = "{}" }))
+                        {
+                            ForceDropPeer(peer, "heartbeat-send-fail");
+                            continue;
+                        }
+                    }
+                    catch
+                    {
+                        ForceDropPeer(peer, "heartbeat-send-fail");
+                        continue;
+                    }
                 }
+                CheckIdle(peer, peer);
             }
         }
 
-        private void NoteRecv()
+        private void CheckIdle(PeerConn peer, PeerConn dropTarget)
         {
-            _lastRecvTickMs = Environment.TickCount;
-            if (_lastRecvTickMs == 0)
-                _lastRecvTickMs = 1;
+            if (peer == null || peer.LastRecvTickMs <= 0)
+                return;
+            var idle = Environment.TickCount - peer.LastRecvTickMs;
+            if (idle < 0) idle = HeartbeatTimeoutMs + 1;
+            if (idle > HeartbeatTimeoutMs)
+            {
+                _log.Warn("[Net] Heartbeat timeout — dropping peer=" + (peer.PeerId ?? peer.ConnKey));
+                ForceDropPeer(dropTarget ?? peer, "heartbeat-timeout");
+            }
         }
 
-        private void ForceDropPeer(string reason)
+        private void NoteRecvForSource(string peerId)
+        {
+            if (Role == PeerRole.Guest)
+            {
+                NoteRecv(_guestLink);
+                return;
+            }
+            if (string.IsNullOrEmpty(peerId))
+                return;
+            lock (_peersLock)
+            {
+                if (_peersByPeerId.TryGetValue(peerId, out var p))
+                    NoteRecv(p);
+            }
+        }
+
+        private static void NoteRecv(PeerConn peer)
+        {
+            if (peer == null) return;
+            peer.LastRecvTickMs = Environment.TickCount;
+            if (peer.LastRecvTickMs == 0)
+                peer.LastRecvTickMs = 1;
+        }
+
+        private void ForceDropPeer(PeerConn peer, string reason)
         {
             if (Role == PeerRole.Host)
-                DropGuestKeepHosting(reason);
+            {
+                if (peer != null)
+                    DropPeerKeepHosting(peer, reason);
+                else
+                {
+                    // Drop all (legacy)
+                    List<PeerConn> all;
+                    lock (_peersLock)
+                        all = new List<PeerConn>(_peersByConn.Values);
+                    foreach (var p in all)
+                        DropPeerKeepHosting(p, reason);
+                }
+            }
             else if (Role == PeerRole.Guest)
                 Disconnect(reason);
         }
@@ -198,10 +385,10 @@ namespace AnnW.LanMp.Protocol
             Disconnect("restart-host");
             Role = PeerRole.Host;
             _running = true;
-            _welcomeReceived = true; // host does not need Welcome
+            _welcomeReceived = true;
             _listener = new TcpListener(IPAddress.Any, port);
             _listener.Start();
-            _log.Info($"[Net] Hosting on 0.0.0.0:{port} peerId={_localPeerId}");
+            _log.Info($"[Net] Hosting on 0.0.0.0:{port} peerId={_localPeerId} (multi-guest)");
             _acceptThread = new Thread(AcceptLoop) { IsBackground = true, Name = "LanMp-Accept" };
             _acceptThread.Start();
         }
@@ -212,17 +399,27 @@ namespace AnnW.LanMp.Protocol
             Role = PeerRole.Guest;
             _welcomeReceived = false;
             LastReject = null;
+            _guestHostPeerId = null;
+            _guestHostDisplayName = "";
             if (!WireCodec.TryParseEndpoint(address, out var host, out var port))
                 throw new ArgumentException("Invalid address, expected host:port");
 
             _running = true;
-            _client = new TcpClient();
-            _client.NoDelay = true;
-            _client.Connect(host, port);
-            _stream = _client.GetStream();
-            NoteRecv();
+            var client = new TcpClient();
+            client.NoDelay = true;
+            client.Connect(host, port);
+            var stream = client.GetStream();
+            var conn = new PeerConn
+            {
+                ConnKey = "guest-self",
+                Client = client,
+                Stream = stream,
+                Admitted = true
+            };
+            NoteRecv(conn);
+            _guestLink = conn;
             _log.Info($"[Net] TCP to {host}:{port} as Guest peerId={_localPeerId} (await Welcome)");
-            StartReader();
+            StartReader(conn);
             Send(new Envelope
             {
                 Type = MsgType.Hello,
@@ -233,44 +430,48 @@ namespace AnnW.LanMp.Protocol
                     displayName = LocalDisplayName ?? ""
                 })
             });
-            // OnConnected fires on Welcome in Pump — not here.
         }
 
         public void Disconnect(string reason)
         {
             var wasRole = Role;
             _running = false;
-            _hostAwaitingHello = false;
             try
             {
-                if (_stream != null && _client != null && _client.Connected)
+                if (wasRole == PeerRole.Guest && _guestLink != null && IsPeerLive(_guestLink))
                 {
-                    Send(new Envelope
+                    TrySendToConn(_guestLink, new Envelope
                     {
                         Type = MsgType.Disconnect,
                         PayloadJson = JsonUtil.ToJson(new DisconnectPayload { reason = reason })
                     });
                 }
+                else if (wasRole == PeerRole.Host)
+                {
+                    List<PeerConn> all;
+                    lock (_peersLock)
+                        all = new List<PeerConn>(_peersByConn.Values);
+                    foreach (var p in all)
+                    {
+                        TrySendToConn(p, new Envelope
+                        {
+                            Type = MsgType.Disconnect,
+                            PayloadJson = JsonUtil.ToJson(new DisconnectPayload { reason = reason })
+                        });
+                    }
+                }
             }
             catch { /* ignore */ }
 
-            try { _stream?.Close(); } catch { }
-            try { _client?.Close(); } catch { }
+            CloseAllPeers();
             try { _listener?.Stop(); } catch { }
-            lock (_clientLock)
-            {
-                _stream = null;
-                _client = null;
-            }
-            // Keep listener only if we meant to stay hosting — Disconnect stops host too.
             _listener = null;
             Role = PeerRole.None;
-            RemotePeerId = null;
-            RemoteDisplayName = "";
+            _guestLink = null;
+            _guestHostPeerId = null;
+            _guestHostDisplayName = "";
             _welcomeReceived = false;
-            _lastRecvTickMs = 0;
-            // Intentional StartHost/ConnectGuest restarts must not fire UI leave handlers
-            // (queued notify would run after Role is already Host/Guest again).
+
             var intentionalRestart = reason != null &&
                 (reason.StartsWith("restart-", StringComparison.Ordinal) ||
                  reason == "shutdown");
@@ -279,7 +480,7 @@ namespace AnnW.LanMp.Protocol
             _log.Info("[Net] Disconnected: " + reason + " (was " + wasRole + ")");
         }
 
-        /// <summary>Host: drop guest TCP but keep listening. Safe to call from any thread.</summary>
+        /// <summary>Host: drop one guest (or legacy: drop first). Listener stays up.</summary>
         public void DropGuestKeepHosting(string reason)
         {
             if (Role != PeerRole.Host)
@@ -287,51 +488,127 @@ namespace AnnW.LanMp.Protocol
                 Disconnect(reason);
                 return;
             }
-
-            bool hadGuest;
-            TcpClient clientToClose = null;
-            NetworkStream streamToClose = null;
-            lock (_clientLock)
+            PeerConn target = null;
+            lock (_peersLock)
             {
-                hadGuest = _client != null || _stream != null;
-                if (hadGuest)
+                foreach (var p in _peersByConn.Values)
                 {
-                    streamToClose = _stream;
-                    clientToClose = _client;
-                    _stream = null;
-                    _client = null;
+                    target = p;
+                    break;
                 }
             }
+            if (target != null)
+                DropPeerKeepHosting(target, reason);
+        }
 
-            if (!hadGuest)
+        public void DropPeerKeepHosting(string peerId, string reason)
+        {
+            if (Role != PeerRole.Host || string.IsNullOrEmpty(peerId))
                 return;
+            PeerConn peer;
+            lock (_peersLock)
+            {
+                if (!_peersByPeerId.TryGetValue(peerId, out peer))
+                    return;
+            }
+            DropPeerKeepHosting(peer, reason, notifyLobby: true);
+        }
+
+        /// <summary>Host: drop every guest TCP without lobby seat events (post MatchAbort).</summary>
+        public void DropAllPeersKeepHosting(string reason)
+        {
+            if (Role != PeerRole.Host)
+                return;
+            List<PeerConn> all;
+            lock (_peersLock)
+                all = new List<PeerConn>(_peersByConn.Values);
+            foreach (var p in all)
+                DropPeerKeepHosting(p, reason ?? "drop-all", notifyLobby: false);
+        }
+
+        private void DropPeerKeepHosting(PeerConn peer, string reason)
+        {
+            DropPeerKeepHosting(peer, reason, notifyLobby: true);
+        }
+
+        private void DropPeerKeepHosting(PeerConn peer, string reason, bool notifyLobby)
+        {
+            if (peer == null || Role != PeerRole.Host)
+                return;
+            if (peer.Dropped)
+                return;
+            peer.Dropped = true;
+
+            var peerId = peer.PeerId ?? "";
+            var wasAdmitted = peer.Admitted;
+            RemovePeerIfCurrent(peer);
 
             try
             {
-                if (streamToClose != null && clientToClose != null && clientToClose.Connected)
+                if (peer.Stream != null && peer.Client != null && peer.Client.Connected)
                 {
                     var env = new Envelope
                     {
                         Type = MsgType.Disconnect,
-                        Seq = _nextSeq++,
                         ProtocolVersion = ProtocolVersion,
                         PayloadJson = JsonUtil.ToJson(new DisconnectPayload { reason = reason })
                     };
+                    lock (_seqLock)
+                        env.Seq = _nextSeq++;
                     var frame = WireCodec.EncodeFrame(env);
-                    lock (_sendLock)
-                        streamToClose.Write(frame, 0, frame.Length);
+                    peer.Stream.Write(frame, 0, frame.Length);
                 }
             }
-            catch { /* ignore — guest may already be gone after LobbyReject */ }
+            catch { /* ignore */ }
 
-            try { streamToClose?.Close(); } catch { }
-            try { clientToClose?.Close(); } catch { }
-            RemotePeerId = null;
-            RemoteDisplayName = "";
-            _hostAwaitingHello = false;
-            _log.Info("[Net] Guest dropped, still hosting: " + reason);
-            // Unity UI must not run on the TCP read thread (crash: TMP Mesh from ReadLoop).
-            FireDisconnected(reason);
+            try { peer.Stream?.Close(); } catch { }
+            try { peer.Client?.Close(); } catch { }
+
+            _log.Info("[Net] Peer dropped, still hosting: " + reason + " peer=" + peerId +
+                      " notifyLobby=" + notifyLobby);
+            // Lobby seat release only for admitted peers that were not silently replaced.
+            if (notifyLobby && wasAdmitted && !string.IsNullOrEmpty(peerId))
+                FirePeerDisconnected(peerId, reason);
+            // Do NOT FireDisconnected here — that used to AbortMatch for every single guest leave
+            // while remaining guests stayed in-battle with no MatchAbort (P0 multi-guest orphan).
+        }
+
+        /// <summary>Remove from maps only if this instance is still the registered one.</summary>
+        private void RemovePeerIfCurrent(PeerConn peer)
+        {
+            lock (_peersLock)
+            {
+                if (_peersByConn.TryGetValue(peer.ConnKey, out var byConn) &&
+                    ReferenceEquals(byConn, peer))
+                    _peersByConn.Remove(peer.ConnKey);
+                if (!string.IsNullOrEmpty(peer.PeerId) &&
+                    _peersByPeerId.TryGetValue(peer.PeerId, out var byId) &&
+                    ReferenceEquals(byId, peer))
+                    _peersByPeerId.Remove(peer.PeerId);
+            }
+        }
+
+        private void RemovePeerLocked(PeerConn peer) => RemovePeerIfCurrent(peer);
+
+        private void CloseAllPeers()
+        {
+            List<PeerConn> all;
+            lock (_peersLock)
+            {
+                all = new List<PeerConn>(_peersByConn.Values);
+                _peersByConn.Clear();
+                _peersByPeerId.Clear();
+            }
+            if (_guestLink != null)
+            {
+                all.Add(_guestLink);
+                _guestLink = null;
+            }
+            foreach (var p in all)
+            {
+                try { p.Stream?.Close(); } catch { }
+                try { p.Client?.Close(); } catch { }
+            }
         }
 
         private void RunOnMainThread(Action action)
@@ -340,7 +617,6 @@ namespace AnnW.LanMp.Protocol
             _mainThreadActions.Enqueue(action);
         }
 
-        /// <summary>Fire OnDisconnected on main thread (Disconnect may be called off-thread).</summary>
         private void FireDisconnected(string reason)
         {
             RunOnMainThread(() =>
@@ -350,24 +626,97 @@ namespace AnnW.LanMp.Protocol
             });
         }
 
+        private void FirePeerDisconnected(string peerId, string reason)
+        {
+            RunOnMainThread(() =>
+            {
+                try { OnPeerDisconnected?.Invoke(peerId ?? "", reason); }
+                catch (Exception ex) { _log.Error("[Net] OnPeerDisconnected: " + ex); }
+            });
+        }
+
         public bool TrySend(Envelope env)
+        {
+            if (Role == PeerRole.Guest)
+                return TrySendToConn(_guestLink, env);
+            // Host legacy: broadcast to all admitted peers.
+            return TryBroadcast(env);
+        }
+
+        public bool TrySendTo(string peerId, Envelope env)
+        {
+            if (env == null || string.IsNullOrEmpty(peerId))
+                return false;
+            PeerConn peer;
+            lock (_peersLock)
+            {
+                if (!_peersByPeerId.TryGetValue(peerId, out peer))
+                    return false;
+            }
+            return TrySendToConn(peer, env);
+        }
+
+        public bool TryBroadcast(Envelope env)
         {
             if (env == null)
                 return false;
-            var stream = _stream;
-            var client = _client;
+            if (Role == PeerRole.Guest)
+                return TrySendToConn(_guestLink, env);
+
+            List<PeerConn> targets;
+            lock (_peersLock)
+            {
+                targets = new List<PeerConn>();
+                foreach (var p in _peersByPeerId.Values)
+                {
+                    if (IsPeerLive(p))
+                        targets.Add(p);
+                }
+            }
+            if (targets.Count == 0)
+                return false;
+            var ok = true;
+            foreach (var p in targets)
+            {
+                if (!TrySendToConn(p, CloneEnv(env)))
+                    ok = false;
+            }
+            return ok;
+        }
+
+        private static Envelope CloneEnv(Envelope env)
+        {
+            return new Envelope
+            {
+                ProtocolVersion = env.ProtocolVersion,
+                Type = env.Type,
+                BattleId = env.BattleId,
+                Seq = env.Seq,
+                PayloadJson = env.PayloadJson,
+                SourcePeerId = env.SourcePeerId
+            };
+        }
+
+        private bool TrySendToConn(PeerConn peer, Envelope env)
+        {
+            if (env == null || peer == null)
+                return false;
+            var stream = peer.Stream;
+            var client = peer.Client;
             if (stream == null || client == null || !client.Connected)
                 return false;
             try
             {
-                lock (_sendLock)
+                lock (peer)
                 {
-                    // Re-check under lock — Disconnect may have cleared stream.
-                    stream = _stream;
+                    stream = peer.Stream;
                     if (stream == null)
                         return false;
-                    env.Seq = _nextSeq++;
-                    env.ProtocolVersion = ProtocolVersion;
+                    lock (_seqLock)
+                    {
+                        env.Seq = _nextSeq++;
+                        env.ProtocolVersion = ProtocolVersion;
+                    }
                     var frame = WireCodec.EncodeFrame(env);
                     stream.Write(frame, 0, frame.Length);
                     stream.Flush();
@@ -381,11 +730,10 @@ namespace AnnW.LanMp.Protocol
             }
         }
 
-        /// <summary>Best-effort send (lobby heartbeat / disconnect notify). Prefer TrySend when failure must Abort.</summary>
-        public void Send(Envelope env)
-        {
-            TrySend(env);
-        }
+        public void Send(Envelope env) => TrySend(env);
+
+        private static bool IsPeerLive(PeerConn p) =>
+            p != null && p.Client != null && p.Client.Connected && p.Stream != null;
 
         private void AcceptLoop()
         {
@@ -406,26 +754,21 @@ namespace AnnW.LanMp.Protocol
                     catch { break; }
                     incoming.NoDelay = true;
 
-                    lock (_clientLock)
+                    var connKey = "tmp-" + Guid.NewGuid().ToString("N").Substring(0, 8);
+                    var peer = new PeerConn
                     {
-                        var busy = _client != null && _client.Connected;
-                        if (busy)
-                        {
-                            // Phase A: reject extras with a short-lived reader
-                            ThreadPool.QueueUserWorkItem(_ => RejectExtraClient(incoming));
-                            continue;
-                        }
+                        ConnKey = connKey,
+                        Client = incoming,
+                        Stream = incoming.GetStream(),
+                        AwaitingHello = true,
+                        Admitted = false
+                    };
+                    NoteRecv(peer);
+                    lock (_peersLock)
+                        _peersByConn[connKey] = peer;
 
-                        _client = incoming;
-                        _stream = incoming.GetStream();
-                        _hostAwaitingHello = true;
-                        RemotePeerId = null;
-                        RemoteDisplayName = "";
-                        NoteRecv();
-                    }
-
-                    _log.Info("[Net] Guest TCP accepted — awaiting Hello");
-                    StartReader();
+                    _log.Info("[Net] Guest TCP accepted conn=" + connKey + " — awaiting Hello");
+                    StartReader(peer);
                 }
             }
             catch (Exception ex)
@@ -435,90 +778,25 @@ namespace AnnW.LanMp.Protocol
             }
         }
 
-        private void RejectExtraClient(TcpClient extra)
+        private void StartReader(PeerConn peer)
         {
-            try
+            peer.ReadThread = new Thread(() => ReadLoop(peer))
             {
-                using (extra)
-                {
-                    var stream = extra.GetStream();
-                    // Best-effort: wait briefly for Hello then send Reject
-                    extra.ReceiveTimeout = 3000;
-                    var env = TryReadOneEnvelope(stream, 3000);
-                    HelloPayload hello = null;
-                    if (env != null && env.Type == MsgType.Hello)
-                        hello = JsonUtil.FromJson<HelloPayload>(env.PayloadJson);
-
-                    var reject = new LobbyRejectPayload
-                    {
-                        code = (int)LobbyRejectCode.GuestSlotTaken,
-                        message = LobbySeatLogic.RejectMessage(LobbyRejectCode.GuestSlotTaken),
-                        joinableSlots = 0
-                    };
-                    if (AdmitGuest != null && hello != null)
-                    {
-                        var gated = AdmitGuest(hello);
-                        if (gated != null)
-                            reject = gated;
-                    }
-
-                    var frame = WireCodec.EncodeFrame(new Envelope
-                    {
-                        Type = MsgType.LobbyReject,
-                        ProtocolVersion = ProtocolVersion,
-                        PayloadJson = JsonUtil.ToJson(reject)
-                    });
-                    stream.Write(frame, 0, frame.Length);
-                    stream.Flush();
-                    Thread.Sleep(50);
-                }
-            }
-            catch (Exception ex)
-            {
-                _log.Warn("[Net] RejectExtraClient: " + ex.Message);
-            }
+                IsBackground = true,
+                Name = "LanMp-Read-" + peer.ConnKey
+            };
+            peer.ReadThread.Start();
         }
 
-        private static Envelope TryReadOneEnvelope(NetworkStream stream, int timeoutMs)
-        {
-            try
-            {
-                var lenBuf = new byte[4];
-                if (!ReadExact(stream, lenBuf, 4))
-                    return null;
-                var len = IPAddress.NetworkToHostOrder(BitConverter.ToInt32(lenBuf, 0));
-                if (len <= 0 || len > 2_000_000)
-                    return null;
-                var payload = new byte[len];
-                if (!ReadExact(stream, payload, len))
-                    return null;
-                var frame = new byte[4 + len];
-                Buffer.BlockCopy(lenBuf, 0, frame, 0, 4);
-                Buffer.BlockCopy(payload, 0, frame, 4, len);
-                WireCodec.TryDecodeFrame(frame, 0, frame.Length, out var env, out _);
-                return env;
-            }
-            catch
-            {
-                return null;
-            }
-        }
-
-        private void StartReader()
-        {
-            _readThread = new Thread(ReadLoop) { IsBackground = true, Name = "LanMp-Read" };
-            _readThread.Start();
-        }
-
-        private void ReadLoop()
+        private void ReadLoop(PeerConn peer)
         {
             var lenBuf = new byte[4];
             string endReason = null;
             try
             {
-                while (_running && _stream != null)
+                while (_running && peer.Stream != null && !peer.Dropped)
                 {
-                    if (!ReadExact(_stream, lenBuf, 4))
+                    if (!ReadExact(peer.Stream, lenBuf, 4))
                     {
                         endReason = "remote-eof";
                         break;
@@ -527,7 +805,7 @@ namespace AnnW.LanMp.Protocol
                     if (len <= 0 || len > 2_000_000)
                         throw new IOException("Invalid frame length " + len);
                     var payload = new byte[len];
-                    if (!ReadExact(_stream, payload, len))
+                    if (!ReadExact(peer.Stream, payload, len))
                     {
                         endReason = "remote-eof";
                         break;
@@ -537,12 +815,21 @@ namespace AnnW.LanMp.Protocol
                     Buffer.BlockCopy(payload, 0, frame, 4, len);
                     if (!WireCodec.TryDecodeFrame(frame, 0, frame.Length, out var env, out _))
                         continue;
-                    NoteRecv();
+                    NoteRecv(peer);
+
+                    // Host: never trust wire SourcePeerId; stamp only after admit.
+                    if (Role == PeerRole.Host)
+                    {
+                        env.SourcePeerId = null;
+                        if (peer.Admitted && !string.IsNullOrEmpty(peer.PeerId))
+                            env.SourcePeerId = peer.PeerId;
+                    }
+
                     if (env.ProtocolVersion != ProtocolVersion)
                     {
-                        if (Role == PeerRole.Host && _hostAwaitingHello)
+                        if (Role == PeerRole.Host && peer.AwaitingHello)
                         {
-                            SendRejectAndDrop(new LobbyRejectPayload
+                            SendRejectAndDropConn(peer, new LobbyRejectPayload
                             {
                                 code = (int)LobbyRejectCode.ProtocolMismatch,
                                 message = LobbySeatLogic.RejectMessage(LobbyRejectCode.ProtocolMismatch)
@@ -551,7 +838,10 @@ namespace AnnW.LanMp.Protocol
                         else
                         {
                             _log.Error($"[Net] Protocol mismatch remote={env.ProtocolVersion} local={ProtocolVersion}");
-                            Disconnect("protocol-mismatch");
+                            if (Role == PeerRole.Host)
+                                DropPeerKeepHosting(peer, "protocol-mismatch");
+                            else
+                                Disconnect("protocol-mismatch");
                         }
                         endReason = null;
                         break;
@@ -559,17 +849,23 @@ namespace AnnW.LanMp.Protocol
 
                     if (env.Type == MsgType.Hello && Role == PeerRole.Host)
                     {
-                        // Defer admit + Welcome to Pump (main thread) — do not mutate lobby off-thread.
-                        _pendingHostHellos.Enqueue(env);
+                        _pendingHostHellos.Enqueue(new PendingHello { ConnKey = peer.ConnKey, Env = env });
+                        continue;
+                    }
+
+                    // Host: drop all non-Hello traffic until admitted (blocks forged Ready/Intent).
+                    if (Role == PeerRole.Host && !peer.Admitted)
+                    {
+                        _log.Warn("[Net] Dropping pre-admit frame type=" + env.Type + " conn=" + peer.ConnKey);
                         continue;
                     }
 
                     if (env.Type == MsgType.Disconnect)
                     {
                         _incoming.Enqueue(env);
-                        endReason = null; // Disconnect/Drop below owns lifecycle
+                        endReason = null;
                         if (Role == PeerRole.Host)
-                            DropGuestKeepHosting("remote-disconnect");
+                            DropPeerKeepHosting(peer, "remote-disconnect");
                         else
                             Disconnect("remote-disconnect");
                         break;
@@ -580,26 +876,35 @@ namespace AnnW.LanMp.Protocol
             }
             catch (Exception ex)
             {
-                if (_running)
+                if (_running && !peer.Dropped)
                 {
-                    _log.Warn("[Net] ReadLoop ended: " + ex.Message);
+                    _log.Warn("[Net] ReadLoop ended: " + ex.Message + " conn=" + peer.ConnKey);
                     endReason = "read-error";
                 }
             }
 
-            // Clean peer EOF used to fall out of the loop with no Disconnect — Guest kept playing.
-            if (_running && endReason != null)
+            if (_running && endReason != null && !peer.Dropped)
             {
-                _log.Warn("[Net] ReadLoop peer lost: " + endReason);
+                _log.Warn("[Net] ReadLoop peer lost: " + endReason + " conn=" + peer.ConnKey);
                 if (Role == PeerRole.Host)
-                    DropGuestKeepHosting(endReason);
+                    DropPeerKeepHosting(peer, endReason);
                 else
                     Disconnect(endReason);
             }
         }
 
-        private bool HandleHostHello(Envelope env)
+        private bool HandleHostHello(string connKey, Envelope env)
         {
+            PeerConn peer;
+            lock (_peersLock)
+            {
+                if (!_peersByConn.TryGetValue(connKey, out peer))
+                {
+                    _log.Warn("[Net] Hello for unknown conn=" + connKey);
+                    return false;
+                }
+            }
+
             HelloPayload hello;
             try
             {
@@ -607,7 +912,7 @@ namespace AnnW.LanMp.Protocol
             }
             catch
             {
-                SendRejectAndDrop(new LobbyRejectPayload
+                SendRejectAndDropConn(peer, new LobbyRejectPayload
                 {
                     code = (int)LobbyRejectCode.Generic,
                     message = LobbySeatLogic.RejectMessage(LobbyRejectCode.Generic)
@@ -617,13 +922,26 @@ namespace AnnW.LanMp.Protocol
 
             if (hello == null || hello.protocolVersion != ProtocolVersion)
             {
-                SendRejectAndDrop(new LobbyRejectPayload
+                SendRejectAndDropConn(peer, new LobbyRejectPayload
                 {
                     code = (int)LobbyRejectCode.ProtocolMismatch,
                     message = LobbySeatLogic.RejectMessage(LobbyRejectCode.ProtocolMismatch)
                 });
                 return false;
             }
+
+            // Already admitted same peerId (reconnect): silently supersede old conn — do not
+            // FirePeerDisconnected (would release seat) or Remove from maps under new peer.
+            PeerConn existing = null;
+            lock (_peersLock)
+            {
+                if (_peersByPeerId.TryGetValue(hello.peerId, out existing) && existing != peer)
+                    _log.Warn("[Net] Duplicate peerId — superseding old conn peer=" + hello.peerId);
+                else
+                    existing = null;
+            }
+            if (existing != null)
+                DropPeerKeepHosting(existing, "peer-replaced", notifyLobby: false);
 
             LobbyRejectPayload reject = null;
             try
@@ -642,13 +960,16 @@ namespace AnnW.LanMp.Protocol
 
             if (reject != null)
             {
-                SendRejectAndDrop(reject);
+                SendRejectAndDropConn(peer, reject);
                 return false;
             }
 
-            RemotePeerId = hello.peerId;
-            RemoteDisplayName = hello.displayName ?? "";
-            _hostAwaitingHello = false;
+            peer.PeerId = hello.peerId;
+            peer.DisplayName = hello.displayName ?? "";
+            peer.AwaitingHello = false;
+            peer.Admitted = true;
+            lock (_peersLock)
+                _peersByPeerId[hello.peerId] = peer;
 
             try
             {
@@ -659,9 +980,7 @@ namespace AnnW.LanMp.Protocol
                 _log.Error("[Net] OnGuestAdmitted: " + ex);
             }
 
-            var assigned = -1;
-            // assigned seat is already in draft via OnGuestAdmitted; Welcome carries index for convenience
-            Send(new Envelope
+            TrySendToConn(peer, new Envelope
             {
                 Type = MsgType.Welcome,
                 PayloadJson = JsonUtil.ToJson(new WelcomePayload
@@ -669,21 +988,22 @@ namespace AnnW.LanMp.Protocol
                     peerId = _localPeerId,
                     protocolVersion = ProtocolVersion,
                     displayName = LocalDisplayName ?? "",
-                    assignedSeatIndex = assigned
+                    assignedSeatIndex = -1
                 })
             });
 
-            _incoming.Enqueue(env); // optional: allow lobby to see Hello
+            env.SourcePeerId = hello.peerId;
+            _incoming.Enqueue(env);
             try { OnConnected?.Invoke(); }
             catch (Exception ex) { _log.Error("[Net] OnConnected: " + ex); }
             return true;
         }
 
-        private void SendRejectAndDrop(LobbyRejectPayload reject)
+        private void SendRejectAndDropConn(PeerConn peer, LobbyRejectPayload reject)
         {
             try
             {
-                Send(new Envelope
+                TrySendToConn(peer, new Envelope
                 {
                     Type = MsgType.LobbyReject,
                     PayloadJson = JsonUtil.ToJson(reject)
@@ -691,7 +1011,7 @@ namespace AnnW.LanMp.Protocol
                 Thread.Sleep(30);
             }
             catch { /* ignore */ }
-            DropGuestKeepHosting("admit-reject");
+            DropPeerKeepHosting(peer, "admit-reject");
         }
 
         private static bool ReadExact(NetworkStream stream, byte[] buffer, int size)

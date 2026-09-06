@@ -228,7 +228,9 @@ namespace AnnW.LanMp.Ui
             if (net.Role == Protocol.PeerRole.None)
                 return "状态: 未连接 — 请创建或加入房间";
             if (net.Role == Protocol.PeerRole.Host)
-                return net.IsConnected ? "状态: 主机（客机已连接）" : "状态: 主机监听 :" + plugin.HostPort.Value;
+                return net.IsConnected
+                    ? "状态: 主机（客机 " + net.ConnectedPeerCount + " 已连接）"
+                    : "状态: 主机监听 :" + plugin.HostPort.Value;
             return net.IsConnected ? "状态: 客机已连接" : "状态: 客机未连接";
         }
 
