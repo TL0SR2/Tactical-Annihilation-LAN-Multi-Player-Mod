@@ -18,7 +18,7 @@ namespace AnnW.LanMp.Ui
         private const float ColKind = 1.35f;
         private const float ColCo = 1.25f;
         private const float ColDiff = 1.05f;
-        private const float ColEco = 0.85f;
+        private const float ColEco = 1.55f;
         private const float ColIntel = 0.85f;
         private const float ColTeam = 0.85f;
         private const float ColColor = 0.85f;
@@ -128,21 +128,18 @@ namespace AnnW.LanMp.Ui
                         LanSeatCell.AddStatic(row, "Diff", ColDiff, "—");
                     }
 
-                    // Economy multiplier — Host only (all seats). LAN ladder up to ×100.
+                    // Economy multiplier — Host-only log slider (×0.1 … ×1 … ×100).
                     {
-                        var ecoOpts = BuildResMulOptions();
-                        var resTable = GameCompatProbe.LanResMulOptionsLive();
-                        var ecoId = GameCompatProbe.IndexOfNearest(
-                            resTable,
-                            seat.resPercent > 0f ? seat.resPercent : SkirmishSeatEconomy.DefaultResPercent);
-                        LanSeatCell.AddDropdown(row, "Eco", ColEco, ecoOpts, ecoId, id =>
+                        var ecoMul = seat.resPercent > 0f
+                            ? seat.resPercent
+                            : SkirmishSeatEconomy.DefaultResPercent;
+                        LanSeatCell.AddEcoLogSlider(row, ColEco, ecoMul, v =>
                         {
                             LanMpPlugin.Instance?.Lobby.RequestSeatEdit(new SeatEditRequest
                             {
                                 seatIndex = idx,
                                 setResPercent = true,
-                                resPercent = GameCompatProbe.ValueAt(
-                                    resTable, id, SkirmishSeatEconomy.DefaultResPercent)
+                                resPercent = v
                             });
                             onChanged?.Invoke();
                         }, isHost);
@@ -272,18 +269,6 @@ namespace AnnW.LanMp.Ui
             return list;
         }
 
-        private static List<LanDropMenu.Option> BuildResMulOptions()
-        {
-            var list = new List<LanDropMenu.Option>();
-            var opts = GameCompatProbe.LanResMulOptionsLive();
-            for (var i = 0; i < opts.Length; i++)
-            {
-                var v = opts[i];
-                list.Add(new LanDropMenu.Option(FormatMul(v), i));
-            }
-            return list;
-        }
-
         private static List<LanDropMenu.Option> BuildAiIntelOptions()
         {
             var list = new List<LanDropMenu.Option>();
@@ -296,14 +281,7 @@ namespace AnnW.LanMp.Ui
             return list;
         }
 
-        private static string FormatMul(float v)
-        {
-            if (Math.Abs(v - 1f) < 0.001f)
-                return "×1";
-            if (Math.Abs(v * 10f - Math.Round(v * 10f)) < 0.001f)
-                return "×" + v.ToString("0.#");
-            return "×" + v.ToString("0.##");
-        }
+        private static string FormatMul(float v) => SkirmishSeatEconomy.FormatResMul(v);
 
         private static void BuildHeader(RectTransform listRoot)
         {

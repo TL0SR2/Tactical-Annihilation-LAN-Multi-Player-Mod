@@ -1421,17 +1421,18 @@ namespace AnnW.LanMp.Sync
                 }
 
                 // ExecuteAction / DoActionInstant do not re-check UX range — Intent must.
+                // Bind BUILD/TRAIN template from extras before CanDoAction (TrainUnit needs it).
                 if (intent.kind == "DoAction")
                 {
                     if (!ActionLegality.TryValidateDoAction(
                             unit, intent.actionCate, intent.hasTarget,
-                            intent.targetX, intent.targetY, out error))
+                            intent.targetX, intent.targetY, intent.extrasJson, out error))
                         return false;
                 }
                 else if (intent.kind == "UnitMoved")
                 {
                     if (!ActionLegality.TryValidateUnitMoved(
-                            unit, intent.targetX, intent.targetY, out error))
+                            unit, intent.targetX, intent.targetY, forHostAccept: true, out error))
                         return false;
                 }
             }
@@ -1519,7 +1520,9 @@ namespace AnnW.LanMp.Sync
                 fromX = intent.fromX,
                 fromY = intent.fromY,
                 extrasJson = intent.extrasJson,
-                templateId = intent.extrasJson ?? "",
+                templateId = ActionExtrasCodec.TryGetTrainTemplateId(intent.extrasJson, out var tpl)
+                    ? tpl
+                    : "",
                 hasTarget = intent.hasTarget,
                 resultAttachmentJson = ""
             };
@@ -1851,7 +1854,7 @@ namespace AnnW.LanMp.Sync
                 yield break;
             }
 
-            EnsureTrainTemplate(unit, cate, cmd);
+            EnsureActionUxContext(unit, cate, cmd);
 
             TryLookAtUnit(unit);
 
@@ -1898,7 +1901,7 @@ namespace AnnW.LanMp.Sync
             HashSet<int> idsBefore,
             string tag)
         {
-            EnsureTrainTemplate(unit, cate, cmd);
+            EnsureActionUxContext(unit, cate, cmd);
             TryLookAtUnit(unit);
 
             var skipAnim = !PresentationRules.ShouldPresentAttachOnlyDoAction(cmd.moveDuration);
@@ -2057,41 +2060,36 @@ namespace AnnW.LanMp.Sync
             return GameAPI.self.GetTile(new Inctor2(cmd.targetX, cmd.targetY));
         }
 
-        private void EnsureTrainTemplate(UnitData unit, ActionCate cate, CommandDto cmd)
+        /// <summary>
+        /// Rebind UX-only action context (train_template / ux_unload_unit) before
+        /// ExecuteAction / attach-only visuals (Validate uses ActionLegality.Prepare*).
+        /// </summary>
+        private void EnsureActionUxContext(UnitData unit, ActionCate cate, CommandDto cmd)
         {
             if (unit == null || cmd == null)
                 return;
-            if (cate != ActionCate.TRAIN && cate != ActionCate.BUILD)
-                return;
 
-            var name = !string.IsNullOrEmpty(cmd.templateId)
-                ? cmd.templateId
-                : (!string.IsNullOrEmpty(cmd.extrasJson) ? cmd.extrasJson : null);
-            if (string.IsNullOrEmpty(name))
+            var extras = cmd.extrasJson;
+            if (string.IsNullOrEmpty(extras) && !string.IsNullOrEmpty(cmd.templateId))
+                extras = ActionExtrasCodec.FromTrainTemplate(cmd.templateId);
+            else if (!string.IsNullOrEmpty(cmd.templateId) &&
+                     ActionExtrasCodec.NeedsTrainTemplate((int)cate) &&
+                     !ActionExtrasCodec.TryGetTrainTemplateId(extras, out _))
+                extras = ActionExtrasCodec.FromTrainTemplate(cmd.templateId);
+
+            if (string.IsNullOrEmpty(extras) &&
+                ActionExtrasCodec.NeedsTrainTemplate((int)cate))
             {
                 try
                 {
                     if (GS_Battle.self?.ux_unit_template?.sd_unit != null)
-                        name = GS_Battle.self.ux_unit_template.sd_unit.name;
+                        extras = ActionExtrasCodec.FromTrainTemplate(
+                            GS_Battle.self.ux_unit_template.sd_unit.name);
                 }
                 catch { /* ignore */ }
             }
-            if (string.IsNullOrEmpty(name))
-                return;
 
-            try
-            {
-                var action = unit.GetAction(cate);
-                if (action == null)
-                    return;
-                var tpl = UnitTemplate.Acquire(name);
-                if (tpl != null)
-                    action.train_template = tpl;
-            }
-            catch (Exception ex)
-            {
-                _log.LogWarning("[Sync] train_template: " + ex.Message);
-            }
+            ActionLegality.PrepareActionUxContext(unit, cate, extras);
         }
 
         private static void TryLookAtUnit(UnitData unit)
@@ -2129,7 +2127,7 @@ namespace AnnW.LanMp.Sync
                 return;
             }
             var cate = (ActionCate)cmd.actionCate;
-            EnsureTrainTemplate(unit, cate, cmd);
+            EnsureActionUxContext(unit, cate, cmd);
             // Do NOT use GameAPI.DoActionInstant — it GetValid's coords and drops null-target AutoSetPos.
             var tile = ResolveActionTile(cmd);
             unit.DoActionInstant(tile, cate);

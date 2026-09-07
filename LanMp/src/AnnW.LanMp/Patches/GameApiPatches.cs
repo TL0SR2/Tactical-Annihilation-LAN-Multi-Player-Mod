@@ -247,11 +247,7 @@ namespace AnnW.LanMp.Patches
             {
                 if (the_action?.sd_action != null)
                     cate = the_action.sd_action.cate;
-                if (the_action?.train_template?.sd_unit != null)
-                    extras = the_action.train_template.sd_unit.name;
-                else if ((cate == ActionCate.TRAIN || cate == ActionCate.BUILD) &&
-                         GS_Battle.self?.ux_unit_template?.sd_unit != null)
-                    extras = GS_Battle.self.ux_unit_template.sd_unit.name;
+                extras = ActionLegality.CaptureExtrasForIntent(cate, the_action);
             }
             catch { /* ignore */ }
 
@@ -283,11 +279,7 @@ namespace AnnW.LanMp.Patches
             {
                 if (__instance?.sd_action != null)
                     cate = __instance.sd_action.cate;
-                if (__instance?.train_template?.sd_unit != null)
-                    extras = __instance.train_template.sd_unit.name;
-                else if ((cate == ActionCate.TRAIN || cate == ActionCate.BUILD) &&
-                         GS_Battle.self?.ux_unit_template?.sd_unit != null)
-                    extras = GS_Battle.self.ux_unit_template.sd_unit.name;
+                extras = ActionLegality.CaptureExtrasForIntent(cate, __instance);
             }
             catch { /* ignore */ }
 

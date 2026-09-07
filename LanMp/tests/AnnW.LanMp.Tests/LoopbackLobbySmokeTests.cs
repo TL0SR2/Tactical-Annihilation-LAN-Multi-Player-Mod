@@ -318,15 +318,14 @@ namespace AnnW.LanMp.Tests
         public void LanResMul_extends_to_100x_and_clamps()
         {
             Assert.Equal(100f, SkirmishSeatEconomy.LanMaxResPercent, 3);
+            Assert.Equal(0.1f, SkirmishSeatEconomy.LanMinResPercent, 3);
             Assert.Equal(
                 new float[] { 5f, 10f, 20f, 30f, 50f, 80f, 100f },
                 SkirmishSeatEconomy.LanExtraResMulOptions);
             Assert.Equal(100f, SkirmishSeatEconomy.LanResMulOptions[SkirmishSeatEconomy.LanResMulOptions.Length - 1], 3);
-            Assert.Equal(
-                SkirmishSeatEconomy.ResMulOptions.Length + SkirmishSeatEconomy.LanExtraResMulOptions.Length,
-                SkirmishSeatEconomy.LanResMulOptions.Length);
             Assert.Equal(100f, SkirmishSeatEconomy.ClampLanResPercent(999f), 3);
             Assert.Equal(1f, SkirmishSeatEconomy.ClampLanResPercent(0f), 3);
+            Assert.Equal(0.1f, SkirmishSeatEconomy.ClampLanResPercent(0.05f), 3);
 
             var seat = LobbySeatLogic.MakeAiSeat(0, 0, 0, "", 3);
             seat.resPercent = 100f;
@@ -334,6 +333,28 @@ namespace AnnW.LanMp.Tests
             Assert.Equal(SkirmishSeatEconomy.ControllerCustom, stamp.controller);
             Assert.Equal(100f, stamp.resPercent, 3);
             Assert.Equal(100f, SkirmishSeatEconomy.ResolveEffectiveResMul(100f, 6), 3);
+        }
+
+        [Fact]
+        public void EcoLogSlider_ends_and_midpoint()
+        {
+            Assert.Equal(0.1f, SkirmishSeatEconomy.EcoSliderTToMul(0f), 3);
+            Assert.Equal(1f, SkirmishSeatEconomy.EcoSliderTToMul(0.5f), 3);
+            Assert.Equal(100f, SkirmishSeatEconomy.EcoSliderTToMul(1f), 3);
+
+            Assert.Equal(0f, SkirmishSeatEconomy.EcoMulToSliderT(0.1f), 3);
+            Assert.Equal(0.5f, SkirmishSeatEconomy.EcoMulToSliderT(1f), 3);
+            Assert.Equal(1f, SkirmishSeatEconomy.EcoMulToSliderT(100f), 3);
+
+            // Round-trip a few points
+            foreach (var m in new[] { 0.1f, 0.5f, 1f, 3f, 10f, 50f, 100f })
+            {
+                var t = SkirmishSeatEconomy.EcoMulToSliderT(m);
+                Assert.Equal(m, SkirmishSeatEconomy.EcoSliderTToMul(t), 2);
+            }
+
+            Assert.Equal(10f, SkirmishSeatEconomy.QuantizeLanResPercent(10.4f), 3);
+            Assert.Equal(1.2f, SkirmishSeatEconomy.QuantizeLanResPercent(1.24f), 3);
         }
 
         [Fact]

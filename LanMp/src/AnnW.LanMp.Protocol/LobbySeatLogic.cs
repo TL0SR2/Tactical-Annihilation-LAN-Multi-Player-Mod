@@ -443,7 +443,7 @@ namespace AnnW.LanMp.Protocol
                     message = "resPercent host-only";
                     return false;
                 }
-                seat.resPercent = SkirmishSeatEconomy.ClampLanResPercent(
+                seat.resPercent = SkirmishSeatEconomy.QuantizeLanResPercent(
                     req.resPercent > 0f ? req.resPercent : SkirmishSeatEconomy.DefaultResPercent);
                 // Editing eco on a preset AI slot promotes to Custom so SetupForSkirmish applies SGS values.
                 if (st == LobbySeatState.Ai || st == LobbySeatState.HumanStandby)

@@ -32,6 +32,9 @@ namespace AnnW.LanMp.Protocol
         /// <summary>LAN lobby Eco ceiling (100× / 10000%).</summary>
         public const float LanMaxResPercent = 100f;
 
+        /// <summary>LAN log-slider floor (0.1×); left end of Host Eco slider.</summary>
+        public const float LanMinResPercent = 0.1f;
+
         /// <summary>Vanilla DataUtils.SkirmishAIIntelOptions.</summary>
         public static readonly float[] AiIntelOptions =
         {
@@ -139,14 +142,76 @@ namespace AnnW.LanMp.Protocol
             return merged;
         }
 
-        /// <summary>Host SeatEdit: keep eco in (0, LanMaxResPercent].</summary>
+        /// <summary>
+        /// Host SeatEdit / slider: keep eco in [<see cref="LanMinResPercent"/>, <see cref="LanMaxResPercent"/>].
+        /// Non-positive → default ×1 (omit / clear).
+        /// </summary>
         public static float ClampLanResPercent(float value)
         {
-            if (value <= 0f)
+            if (float.IsNaN(value) || float.IsInfinity(value) || value <= 0f)
                 return DefaultResPercent;
+            if (value < LanMinResPercent)
+                return LanMinResPercent;
             if (value > LanMaxResPercent)
                 return LanMaxResPercent;
             return value;
+        }
+
+        /// <summary>
+        /// Piecewise-log slider t∈[0,1]: left 0.1×, mid 1×, right 100× (LAN room Eco UI).
+        /// </summary>
+        public static float EcoSliderTToMul(float t)
+        {
+            if (t < 0f) t = 0f;
+            if (t > 1f) t = 1f;
+            if (t <= 0.5f)
+            {
+                // 0..0.5 → log10 -1..0 → 0.1..1
+                var u = t * 2f;
+                return (float)Math.Pow(10.0, -1.0 + u);
+            }
+            // 0.5..1 → log10 0..2 → 1..100
+            var v = (t - 0.5f) * 2f;
+            return (float)Math.Pow(10.0, v * 2.0);
+        }
+
+        /// <summary>Inverse of <see cref="EcoSliderTToMul"/>.</summary>
+        public static float EcoMulToSliderT(float mul)
+        {
+            if (float.IsNaN(mul) || float.IsInfinity(mul) || mul <= 0f)
+                mul = DefaultResPercent;
+            if (mul < LanMinResPercent) mul = LanMinResPercent;
+            if (mul > LanMaxResPercent) mul = LanMaxResPercent;
+            if (mul <= 1f)
+            {
+                var log = Math.Log10(mul); // -1..0
+                return 0.5f * (float)(log + 1.0);
+            }
+            var logHi = Math.Log10(mul); // 0..2
+            return 0.5f + 0.5f * (float)(logHi / 2.0);
+        }
+
+        /// <summary>Round slider commits so Draft floats stay readable / stable.</summary>
+        public static float QuantizeLanResPercent(float mul)
+        {
+            mul = ClampLanResPercent(mul);
+            if (mul >= 10f)
+                return (float)Math.Round(mul);
+            if (mul >= 1f)
+                return (float)(Math.Round(mul * 10.0) / 10.0);
+            return (float)(Math.Round(mul * 100.0) / 100.0);
+        }
+
+        public static string FormatResMul(float v)
+        {
+            v = ClampLanResPercent(v);
+            if (ApproxEqual(v, 1f))
+                return "×1";
+            if (v >= 10f)
+                return "×" + v.ToString("0");
+            if (Math.Abs(v * 10f - Math.Round(v * 10f)) < 0.001f)
+                return "×" + v.ToString("0.#");
+            return "×" + v.ToString("0.##");
         }
 
         public static float AiIntelAt(int index)

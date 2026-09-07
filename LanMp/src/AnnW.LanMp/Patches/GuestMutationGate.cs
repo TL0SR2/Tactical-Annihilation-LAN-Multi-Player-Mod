@@ -61,12 +61,12 @@ namespace AnnW.LanMp.Patches
                 if (IntentValidateRules.IsUnitSpentForIntent(intentKind, unit.moved, unit.actioned, cateVal))
                     return false;
 
-                // Move range: safe to check at current pos. DoAction must wait — EQ stashes
-                // attack-from-destination while unit is still at the old tile locally.
+                // Move range: match UX PrepareMoveOp args. DoAction legality waits for Host —
+                // Guest must not fail-fast CanDoAction (Host may lack train_template / FOW).
                 if (kind == Kind.UnitMoved && target.HasValue)
                 {
                     if (!ActionLegality.TryValidateUnitMoved(
-                            unit, target.Value.x, target.Value.y, out var moveErr))
+                            unit, target.Value.x, target.Value.y, forHostAccept: false, out var moveErr))
                     {
                         var msg = ActionLegality.MapUserMessage(moveErr);
                         if (!string.IsNullOrEmpty(msg))
@@ -101,22 +101,8 @@ namespace AnnW.LanMp.Patches
                 return false;
             }
 
-            // Direct DoAction (no pending Move): fail-fast with Host-identical legality.
-            if (kind == Kind.DoAction)
-            {
-                var cateVal = cate.HasValue ? (int)cate.Value : -1;
-                var hasTarget = target.HasValue;
-                var tx = hasTarget ? target.Value.x : 0;
-                var ty = hasTarget ? target.Value.y : 0;
-                if (!ActionLegality.TryValidateDoAction(
-                        unit, cateVal, hasTarget, tx, ty, out var legalErr))
-                {
-                    var msg = ActionLegality.MapUserMessage(legalErr);
-                    if (!string.IsNullOrEmpty(msg))
-                        GateUtil.Toast(msg);
-                    return false;
-                }
-            }
+            // DoAction: do not Guest-side CanDoAction fail-fast — Host Accept binds
+            // train_template from extrasJson and re-checks (Guest toast was false-negative).
 
             var intent = plugin.Sync.BuildIntent(
                 KindToIntent(kind),
