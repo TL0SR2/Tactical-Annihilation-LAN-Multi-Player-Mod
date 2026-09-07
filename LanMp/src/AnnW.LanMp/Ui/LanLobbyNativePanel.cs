@@ -249,6 +249,9 @@ namespace AnnW.LanMp.Ui
             try
             {
                 ApplyDisplayName(plugin);
+                // Drop last-match ghost seats before listening again.
+                try { plugin.Lobby?.ResetDraftOccupancyKeepMap(); }
+                catch { /* ignore */ }
                 plugin.Net.StartHost(plugin.HostPort.Value);
                 Close();
                 LanRoomPanel.Open();

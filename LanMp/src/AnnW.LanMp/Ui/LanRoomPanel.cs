@@ -98,7 +98,14 @@ namespace AnnW.LanMp.Ui
             else
                 ReloadMaps();
 
+            var plugin = LanMpPlugin.Instance;
+            // Drop ghost HumanSeated from last match before painting UI.
+            try { plugin?.Lobby?.ReconcileSeatsToConnectedPeers(); }
+            catch (Exception ex) { LanMpPlugin.Log?.LogWarning("[RoomUI] reconcile: " + ex.Message); }
+
             ApplyLocalNamesToDraftIfHost();
+            if (plugin?.Lobby?.Draft != null)
+                ApplyDraftToUi(plugin.Lobby.Draft);
             RefreshAll();
             _view.ShowPanel();
             LanMpPlugin.Log?.LogInfo("[RoomUI] Opened dedicated LAN room");
@@ -810,9 +817,12 @@ namespace AnnW.LanMp.Ui
             if (plugin == null || plugin.Net.Role != PeerRole.Host)
                 return;
             var d = plugin.Lobby.Draft ?? new LobbyDraftDto();
+            // Only refresh names for seats that are still live HumanSeated (after reconcile).
             LanRoomDraftBuilder.RefreshOccupantNames(d, DisplayName(plugin), GuestDisplayName(plugin));
             if (string.IsNullOrEmpty(d.mapId))
                 plugin.Lobby.PublishLocalDraft(d);
+            else
+                plugin.Lobby.NotifyDraftUiRefresh();
         }
 
         private static void RefreshAll()
@@ -1088,10 +1098,14 @@ namespace AnnW.LanMp.Ui
                     catch { /* ignore */ }
                 }
                 // Guest NotifyLeavingBattle already Disconnects.
+                try { plugin.Lobby?.ResetDraftOccupancyKeepMap(); }
+                catch { /* ignore */ }
                 return;
             }
 
             plugin?.Net.Disconnect("leave-room");
+            try { plugin?.Lobby?.ResetDraftOccupancyKeepMap(); }
+            catch { /* ignore */ }
             Close();
             LanLobbyNativePanel.Open();
         }
@@ -1113,11 +1127,10 @@ namespace AnnW.LanMp.Ui
         {
             if (plugin == null || !plugin.Net.IsConnected)
                 return "";
+            // Live peer name only — never fall back to stale Draft.guestDisplayName from last match.
             if (!string.IsNullOrEmpty(plugin.Net.RemoteDisplayName))
                 return plugin.Net.RemoteDisplayName.Trim();
-            if (!string.IsNullOrEmpty(plugin.Lobby.Draft?.guestDisplayName))
-                return plugin.Lobby.Draft.guestDisplayName;
-            return ShortId(plugin.Net.RemotePeerId);
+            return "";
         }
 
         private static string ShortId(string id)

@@ -40,6 +40,103 @@ namespace AnnW.LanMp.Presentation
         }
 
         /// <summary>
+        /// Units alive locally before attach but absent from Host attachment (combat kills / orphans).
+        /// Must run before Apply removes them.
+        /// </summary>
+        internal static List<UnitData> CollectMissingUnits(
+            HashSet<int> idsBeforeApply,
+            ResultAttachmentDto attach)
+        {
+            var list = new List<UnitData>();
+            if (idsBeforeApply == null || idsBeforeApply.Count == 0)
+                return list;
+
+            var hostIds = new HashSet<int>();
+            if (attach?.units != null)
+            {
+                foreach (var us in attach.units)
+                {
+                    if (us != null)
+                        hostIds.Add(us.unitId);
+                }
+            }
+
+            foreach (var id in idsBeforeApply)
+            {
+                if (hostIds.Contains(id))
+                    continue;
+                var unit = ResultAttachmentBridge.FindUnit(id);
+                if (unit != null && !unit.dead)
+                    list.Add(unit);
+            }
+            return list;
+        }
+
+        /// <summary>
+        /// Presentation-only: mirror UnitData.Hurt → FUIM_FloatNumber.ShowAsDamage(damage/hp_max).
+        /// Does not mutate HP / RNG.
+        /// </summary>
+        internal static void PresentHpDamageFloat(
+            UnitData unit,
+            float oldHp,
+            float newHp,
+            ManualLogSource log = null)
+        {
+            if (unit == null)
+                return;
+            float hpMax;
+            try { hpMax = unit.hp_max.value; }
+            catch { return; }
+
+            if (!CombatPresentationRules.TryDamageRatio(oldHp, newHp, hpMax, out var ratio))
+                return;
+
+            try
+            {
+                FUIM_FloatNumber.CreateFloatText(unit.pos, check_fow: true)?.ShowAsDamage(ratio);
+            }
+            catch (Exception ex)
+            {
+                log?.LogWarning("[Presentation] ShowAsDamage: " + ex.Message);
+            }
+        }
+
+        /// <summary>
+        /// Kick vanilla death VFX coroutine (GameController CoroutineObject). Caller must delay
+        /// before RemoveUnit/Dispose so mesh/VFX are not torn down instantly.
+        /// </summary>
+        internal static void KickUnitDeathVisual(
+            UnitData victim,
+            UnitData attacker,
+            float damageHint,
+            ManualLogSource log = null)
+        {
+            if (victim == null || GameAPI.self == null)
+                return;
+            try
+            {
+                PresentHpDamageFloat(victim, victim.hp_cur, 0f, log);
+            }
+            catch { /* ignore */ }
+
+            try
+            {
+                GameAPI.self.PlayUnitDeathAnimation(
+                    victim.pos,
+                    damageHint > 0.01f ? damageHint : victim.hp_cur,
+                    victim,
+                    DieReason.COMBAT,
+                    attacker,
+                    attacker != null ? attacker.player : null,
+                    null);
+            }
+            catch (Exception ex)
+            {
+                log?.LogWarning("[Presentation] PlayUnitDeathAnimation: " + ex.Message);
+            }
+        }
+
+        /// <summary>
         /// Fire weapon/mesh action presentation without DoActionCell (no RNG / spawn).
         /// Returns seconds the caller should yield on AnnW CoroutineObject (float wait).
         /// </summary>

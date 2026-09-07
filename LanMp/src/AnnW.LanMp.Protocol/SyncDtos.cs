@@ -78,6 +78,8 @@ namespace AnnW.LanMp.Protocol
         public int fraction;
         /// <summary>Lobby peer that owned this seat (Guest match when playerIndex drifts).</summary>
         public string ownerPeerId;
+        /// <summary>Human username stamped at MatchEnd (draft may clear after leave).</summary>
+        public string displayName;
     }
 
     public class MatchEndPayload

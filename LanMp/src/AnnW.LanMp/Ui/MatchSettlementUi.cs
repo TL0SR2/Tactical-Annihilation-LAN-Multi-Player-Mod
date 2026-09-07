@@ -95,21 +95,15 @@ namespace AnnW.LanMp.Ui
                         mark = "淘汰·阵营胜";
                     else if (r.defeated)
                         mark = "败";
-                    var who = string.IsNullOrEmpty(r.ownerPeerId) ? "" : (" @" + ShortPeer(r.ownerPeerId));
-                    sb.AppendLine($"  席{r.playerIndex} 阵营{r.fraction}{who} → {mark}");
+                    var label = LanPlayerNames.ResolveSeatLabel(
+                        r.playerIndex, r.ownerPeerId, r.displayName);
+                    sb.AppendLine($"  {label} 阵营{r.fraction} → {mark}");
                 }
             }
 
             sb.AppendLine();
             sb.Append("（胜负按阵营；中途淘汰可观战至终局再结算）");
             return sb.ToString();
-        }
-
-        private static string ShortPeer(string peerId)
-        {
-            if (string.IsNullOrEmpty(peerId) || peerId.Length <= 6)
-                return peerId ?? "";
-            return peerId.Substring(0, 6);
         }
 
         private static void TryFloater(string title, string body)

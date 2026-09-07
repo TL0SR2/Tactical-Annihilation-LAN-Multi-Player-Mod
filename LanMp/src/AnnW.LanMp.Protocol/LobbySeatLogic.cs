@@ -615,6 +615,8 @@ namespace AnnW.LanMp.Protocol
             {
                 case LobbyRejectCode.ProtocolMismatch:
                     return "协议版本不匹配";
+                case LobbyRejectCode.PluginVersionMismatch:
+                    return "加入失败：双方联机插件版本不一致";
                 case LobbyRejectCode.BattleStarted:
                     return "对局已开始，无法加入";
                 case LobbyRejectCode.RoomFull:

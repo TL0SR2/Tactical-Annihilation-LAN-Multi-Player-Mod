@@ -1,5 +1,6 @@
 # Pack AnnW.LanMp + BepInEx into a game-root distributable zip.
-# Usage: powershell -File LanMp\tools\Pack-Release.ps1 [-Version 0.16.12]
+# Usage: powershell -File LanMp\tools\Pack-Release.ps1 [-Version 0.18.3]
+# Version defaults to LanMpVersion.Current (single source). Optional -Version bumps it first.
 param(
     [string]$Version = ""
 )
@@ -8,13 +9,20 @@ $ErrorActionPreference = "Stop"
 $GameRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
 $LanMpRoot = Join-Path $GameRoot "LanMp"
 $DistRoot = Join-Path $LanMpRoot "dist"
+$SyncScript = Join-Path $LanMpRoot "tools\Sync-Version.ps1"
 
+# Always sync README from LanMpVersion.cs; optional -Version bumps the const first.
 if ([string]::IsNullOrWhiteSpace($Version)) {
-    $pluginCs = Join-Path $LanMpRoot "src\AnnW.LanMp\Plugin.cs"
-    $m = Select-String -Path $pluginCs -Pattern 'PluginVersion\s*=\s*"([^"]+)"' | Select-Object -First 1
-    if (-not $m) { throw "Cannot read PluginVersion from Plugin.cs" }
-    $Version = $m.Matches[0].Groups[1].Value
+    & powershell -ExecutionPolicy Bypass -File $SyncScript | Out-Host
+} else {
+    & powershell -ExecutionPolicy Bypass -File $SyncScript -Version $Version | Out-Host
 }
+if ($LASTEXITCODE -ne 0) { throw "Sync-Version failed" }
+
+$versionCs = Join-Path $LanMpRoot "src\AnnW.LanMp.Protocol\LanMpVersion.cs"
+$m = Select-String -Path $versionCs -Pattern 'Current\s*=\s*"([^"]+)"' | Select-Object -First 1
+if (-not $m) { throw "Cannot read LanMpVersion.Current" }
+$Version = $m.Matches[0].Groups[1].Value
 
 Write-Host "Building Release $Version ..."
 dotnet build (Join-Path $LanMpRoot "src\AnnW.LanMp\AnnW.LanMp.csproj") -c Release | Out-Host

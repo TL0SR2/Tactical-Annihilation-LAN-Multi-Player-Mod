@@ -52,6 +52,11 @@ namespace AnnW.LanMp.Authority
         private bool _openLobbyAfterSettlement;
         /// <summary>Host: drop guests one tick after MatchEnd send so payload can land first.</summary>
         private bool _deferredDropPeersAfterMatchEnd;
+        /// <summary>
+        /// True only after active scene is Battle under StartAuthorized.
+        /// OnLobbyStart must NOT set InLanBattle early — Menu unload would scene-leave abort both peers.
+        /// </summary>
+        private bool _lanBattleSceneEntered;
 
         public AuthorityService(LobbySession lobby, NetSession net, ManualLogSource log)
         {
@@ -75,6 +80,7 @@ namespace AnnW.LanMp.Authority
             _net.OnPeerDisconnected -= OnPeerDisconnected;
             GatesArmed = false;
             InLanBattle = false;
+            _lanBattleSceneEntered = false;
             MatchSettled = false;
             LastMatchEnd = null;
             _openLobbyAfterSettlement = false;
@@ -89,7 +95,12 @@ namespace AnnW.LanMp.Authority
                 try
                 {
                     if (_net.Role == PeerRole.Host)
+                    {
                         _net.DropAllPeersKeepHosting("match-end");
+                        // notifyLobby=false on drop — reconcile here so Open is not the only path.
+                        try { _lobby.ReconcileSeatsToConnectedPeers(); }
+                        catch (Exception ex) { _log.LogWarning("[Authority] post-MatchEnd reconcile: " + ex.Message); }
+                    }
                     else if (_net.IsConnected)
                         _net.Disconnect("match-end");
                 }
@@ -106,7 +117,7 @@ namespace AnnW.LanMp.Authority
                 {
                     if (_net.Role == PeerRole.Host)
                     {
-                        try { _lobby.ReleaseSeatsForDisconnectedPeers(); }
+                        try { _lobby.ReconcileSeatsToConnectedPeers(); }
                         catch (Exception ex) { _log.LogWarning("[Authority] seat reconcile: " + ex.Message); }
                         LanRoomPanel.Open();
                     }
@@ -126,7 +137,7 @@ namespace AnnW.LanMp.Authority
                 {
                     if (_net.Role == PeerRole.Host)
                     {
-                        try { _lobby.ReleaseSeatsForDisconnectedPeers(); }
+                        try { _lobby.ReconcileSeatsToConnectedPeers(); }
                         catch (Exception ex) { _log.LogWarning("[Authority] seat reconcile: " + ex.Message); }
                         LanRoomPanel.Open();
                     }
@@ -172,6 +183,7 @@ namespace AnnW.LanMp.Authority
                 if (_lobby.StartAuthorized)
                 {
                     InLanBattle = true;
+                    _lanBattleSceneEntered = true;
                     _abortApplied = false;
                     MatchSettled = false;
                     LastMatchEnd = null;
@@ -180,12 +192,23 @@ namespace AnnW.LanMp.Authority
                     ApplyBattleIdOverride();
                     HookBattleEvents();
                     ApplyLocalViewBinding("scene");
+                    // Post-LoadScene hitch may still block Ping/Pong for a while.
+                    try { _net.BeginTransportGraceMs(45000); }
+                    catch { /* ignore */ }
                     _log.LogInfo("[Authority] InLanBattle=true gates armed + view bound");
                     BattleSyncTrace.SetRole(_net.Role, _lobby.BattleId ?? PendingBattleId);
                     BattleSyncTrace.Ev("BattleEnter", detail: "InLanBattle");
                 }
             }
-            else if (InLanBattle && !_abortApplied && !MatchSettled)
+            else if (_lobby.StartAuthorized && !_lanBattleSceneEntered &&
+                     !string.IsNullOrEmpty(PendingBattleId))
+            {
+                // LobbyStart already fired; active scene briefly non-Battle during transition.
+                // Must NOT AbortMatch / Disconnect — that is the mutual "peer left" start bug.
+                _log.LogInfo("[Authority] Ignoring non-Battle scene during start transition: " +
+                             (sceneName ?? "(null)"));
+            }
+            else if (InLanBattle && _lanBattleSceneEntered && !_abortApplied && !MatchSettled)
             {
                 // Left battle without AbortMatch (vanilla quit path) — notify peer then clear.
                 _log.LogWarning("[Authority] Left Battle scene while LAN live — aborting");
@@ -201,6 +224,7 @@ namespace AnnW.LanMp.Authority
             {
                 UnhookBattleEvents();
                 InLanBattle = false;
+                _lanBattleSceneEntered = false;
                 GatesArmed = false;
             }
         }
@@ -310,6 +334,8 @@ namespace AnnW.LanMp.Authority
             }
 
             var seed = Environment.TickCount;
+            try { LanPlayerNames.EnsureDraftOccupantNames(_lobby.Draft, _net); }
+            catch { /* ignore */ }
             _lobby.AuthorizeAndBroadcastStart(seed);
             return true;
         }
@@ -376,6 +402,8 @@ namespace AnnW.LanMp.Authority
             }
 
             var winnerFrac = MatchEndRules.AssignFactionWinners(results);
+            var resultArr = results.ToArray();
+            LanPlayerNames.StampResultDisplayNames(resultArr);
 
             var pld = new MatchEndPayload
             {
@@ -385,7 +413,7 @@ namespace AnnW.LanMp.Authority
                 reason = reason ?? "",
                 battleId = _lobby.BattleId ?? "",
                 winnerFraction = winnerFrac,
-                results = results.ToArray()
+                results = resultArr
             };
 
             // Deliver payload while the link still works; peers may disconnect immediately after.
@@ -431,6 +459,9 @@ namespace AnnW.LanMp.Authority
             if (MatchSettled)
                 return;
 
+            // Prefer Host-stamped names; fill gaps from local draft before teardown.
+            LanPlayerNames.StampResultDisplayNames(end.results);
+
             // Resolve while GS_Battle / seats still exist — per local seat/fraction, not Host victory bool.
             LastLocalVictory = ResolveLocalMatchVictory(end);
             LastMatchEnd = end;
@@ -456,6 +487,7 @@ namespace AnnW.LanMp.Authority
 
             UnhookBattleEvents();
             InLanBattle = false;
+            _lanBattleSceneEntered = false;
             GatesArmed = false;
             PendingBattleId = null;
             _lobby.ClearBattleAuthorization();
@@ -520,6 +552,7 @@ namespace AnnW.LanMp.Authority
             BattleSyncTrace.EndBattleSession("MatchAbort:" + reason);
             UnhookBattleEvents();
             InLanBattle = false;
+            _lanBattleSceneEntered = false;
             GatesArmed = false;
             PendingBattleId = null;
             _lobby.ClearBattleAuthorization();
@@ -600,7 +633,18 @@ namespace AnnW.LanMp.Authority
         private void OnPeerDisconnected(string peerId, string reason)
         {
             // Lobby seat release is LobbySession's job.
-            if (_net.Role != PeerRole.Host || !InLanBattle || MatchSettled)
+            if (_net.Role != PeerRole.Host || MatchSettled)
+                return;
+
+            // Start transition: TCP flake / false heartbeat must not convert seats yet.
+            if (!_lanBattleSceneEntered)
+            {
+                _log.LogWarning("[Authority] Peer drop during start transition peer=" + peerId +
+                                " reason=" + reason + " — ignoring AI convert");
+                return;
+            }
+
+            if (!InLanBattle)
                 return;
 
             // Guest quit / drop: keep Host sim running — convert that seat to AI (spectate design).
@@ -818,15 +862,25 @@ namespace AnnW.LanMp.Authority
         {
             PendingBattleId = payload.battleId;
             _abortApplied = false;
+            _lanBattleSceneEntered = false;
+            // Do NOT set InLanBattle here — scene is still Menu/lobby. Setting it early makes
+            // OnSceneChanged treat the leave-Menu transition as scene-leave abort (mutual drop).
             ArmGatesFromDraft();
+            try { LanPlayerNames.EnsureDraftOccupantNames(_lobby.Draft, _net); }
+            catch { /* ignore */ }
+
+            // LoadScene + Bootstrap can stall both main threads; pause heartbeat kills.
+            try { _net.BeginTransportGraceMs(120000); }
+            catch { /* ignore */ }
 
             if (!BattleBootstrap.TryApplyLobbyStart(payload, _net, _log))
             {
                 _log.LogError("[Authority] Abort LoadScene — bootstrap failed");
+                try { _net.ClearTransportGrace(); }
+                catch { /* ignore */ }
                 return;
             }
 
-            InLanBattle = true;
             _log.LogInfo("[Authority] Loading ANNW_Battle after LobbyStart");
             try
             {
@@ -835,6 +889,8 @@ namespace AnnW.LanMp.Authority
             catch (Exception ex)
             {
                 _log.LogError("[Authority] LoadScene failed: " + ex);
+                try { _net.ClearTransportGrace(); }
+                catch { /* ignore */ }
             }
         }
 

@@ -171,11 +171,12 @@ namespace AnnW.LanMp.Ui
                     continue;
                 if (s.peerId == draft.hostPeerId || i == draft.hostSlotIndex)
                     s.occupantName = draft.hostDisplayName;
-                // Keep existing non-host occupantName if already set; only fill legacy guest name
-                // for the first guestPeerId seat when occupant is empty.
-                else if (string.IsNullOrEmpty(s.occupantName) &&
-                         !string.IsNullOrEmpty(draft.guestPeerId) && s.peerId == draft.guestPeerId)
-                    s.occupantName = string.IsNullOrEmpty(draft.guestDisplayName) ? "" : draft.guestDisplayName;
+                // Never invent a guest name for empty seats — only refresh live seated remotes.
+                else if (!string.IsNullOrEmpty(s.peerId) &&
+                         !string.IsNullOrEmpty(draft.guestPeerId) &&
+                         s.peerId == draft.guestPeerId &&
+                         !string.IsNullOrEmpty(draft.guestDisplayName))
+                    s.occupantName = draft.guestDisplayName;
             }
         }
     }

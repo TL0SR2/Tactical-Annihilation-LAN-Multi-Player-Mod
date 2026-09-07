@@ -287,7 +287,8 @@ namespace AnnW.LanMp.Protocol
             // Host peer drops handled by OnPeerDisconnected (seat release).
             if (_net.Role == PeerRole.Host)
                 return;
-            ResetSessionState();
+            // Guest (or Role already None after Disconnect): drop ghost HumanSeated from last match.
+            ResetDraftOccupancyKeepMap();
         }
 
         private void ApplySeatEditAsHost(SeatEditRequest req)
@@ -566,38 +567,158 @@ namespace AnnW.LanMp.Protocol
         }
 
         /// <summary>
-        /// After MatchAbort drops peers: release HumanSeated seats whose TCP is gone
-        /// so Host lobby does not keep ghost occupants.
+        /// Keep map/rules; clear all human occupancy (ghost names from last match).
+        /// Used on Guest disconnect and Host leave-room before a fresh lobby.
         /// </summary>
-        public void ReleaseSeatsForDisconnectedPeers()
+        public void ResetDraftOccupancyKeepMap()
         {
-            if (_net.Role != PeerRole.Host || Draft?.seats == null)
-                return;
-            var live = new HashSet<string>(_net.GetConnectedPeerIds() ?? Array.Empty<string>());
-            var toRelease = new List<string>();
-            foreach (var s in Draft.seats)
+            if (Draft != null)
             {
+                if (Draft.seats != null)
+                {
+                    for (var i = 0; i < Draft.seats.Length; i++)
+                    {
+                        var s = Draft.seats[i];
+                        if (s == null || !s.exist)
+                            continue;
+                        if (LobbySeatLogic.GetState(s) != LobbySeatState.HumanSeated)
+                            continue;
+                        var ai = s.standbyController > 0
+                            ? s.standbyController
+                            : LobbySeatLogic.DefaultAiController;
+                        s.state = (int)LobbySeatState.Ai;
+                        s.peerId = "";
+                        s.occupantName = "";
+                        s.controller = ai;
+                        s.standbyController = ai;
+                    }
+                }
+
+                Draft.hostPeerId = "";
+                Draft.guestPeerId = "";
+                Draft.hostDisplayName = "";
+                Draft.guestDisplayName = "";
+                Draft.guestSlotIndex = -1;
+            }
+
+            ResetSessionState();
+            OnDraftChanged?.Invoke();
+            _log.Info("[Lobby] Draft occupancy cleared (map/rules kept)");
+        }
+
+        /// <summary>
+        /// Host: HumanSeated must match live TCP peers (+ local Host).
+        /// Call after MatchEnd drop, Abort return-to-lobby, and every room Open.
+        /// </summary>
+        public void ReconcileSeatsToConnectedPeers()
+        {
+            if (_net.Role != PeerRole.Host)
+                return;
+            if (Draft?.seats == null || Draft.seats.Length == 0)
+            {
+                ResetSessionState();
+                RecomputeCanStart();
+                return;
+            }
+
+            var local = _net.LocalPeerId ?? "";
+            var live = new HashSet<string>(_net.GetConnectedPeerIds() ?? Array.Empty<string>());
+            if (!string.IsNullOrEmpty(local))
+                live.Add(local);
+
+            var released = 0;
+            var toRelease = new List<string>();
+            for (var i = 0; i < Draft.seats.Length; i++)
+            {
+                var s = Draft.seats[i];
                 if (s == null || LobbySeatLogic.GetState(s) != LobbySeatState.HumanSeated)
                     continue;
-                if (string.IsNullOrEmpty(s.peerId) || s.peerId == _net.LocalPeerId)
-                    continue;
-                if (!live.Contains(s.peerId))
-                    toRelease.Add(s.peerId);
+                if (string.IsNullOrEmpty(s.peerId) || !live.Contains(s.peerId))
+                {
+                    if (!string.IsNullOrEmpty(s.peerId))
+                        toRelease.Add(s.peerId);
+                    else
+                    {
+                        var ai = s.standbyController > 0
+                            ? s.standbyController
+                            : LobbySeatLogic.DefaultAiController;
+                        s.state = (int)LobbySeatState.Ai;
+                        s.occupantName = "";
+                        s.controller = ai;
+                        s.standbyController = ai;
+                        released++;
+                    }
+                }
             }
-            if (toRelease.Count == 0)
-                return;
+
             foreach (var peerId in toRelease)
             {
-                if (LobbySeatLogic.TryReleaseHuman(Draft, peerId, out _))
+                if (LobbySeatLogic.TryReleaseHuman(Draft, peerId, out var idx))
+                {
                     _peerReady.Remove(peerId);
+                    // Ghost from last match → AI (not an open join slot).
+                    if (idx >= 0 && idx < Draft.seats.Length)
+                        LobbySeatLogic.TryDemoteToAi(Draft.seats[idx], out _);
+                    released++;
+                }
             }
+
+            // Ensure local Host is seated with current display name.
+            Draft.hostPeerId = local;
+            if (!string.IsNullOrEmpty(local))
+            {
+                var hostIdx = LobbySeatLogic.FindSeatIndexByPeer(Draft, local);
+                if (hostIdx < 0)
+                {
+                    var idx = Draft.hostSlotIndex;
+                    if (idx < 0 || idx >= Draft.seats.Length)
+                        idx = 0;
+                    var seat = Draft.seats[idx];
+                    if (seat != null && seat.exist)
+                    {
+                        if (LobbySeatLogic.GetState(seat) == LobbySeatState.HumanSeated &&
+                            !string.IsNullOrEmpty(seat.peerId) && seat.peerId != local)
+                            LobbySeatLogic.TryReleaseHuman(Draft, seat.peerId, out _);
+
+                        seat.state = (int)LobbySeatState.HumanSeated;
+                        seat.peerId = local;
+                        seat.occupantName = string.IsNullOrWhiteSpace(_net.LocalDisplayName)
+                            ? (seat.occupantName ?? "")
+                            : _net.LocalDisplayName.Trim();
+                        seat.controller = 0;
+                        Draft.hostSlotIndex = idx;
+                    }
+                }
+                else
+                {
+                    var seat = Draft.seats[hostIdx];
+                    if (seat != null && !string.IsNullOrWhiteSpace(_net.LocalDisplayName))
+                        seat.occupantName = _net.LocalDisplayName.Trim();
+                    Draft.hostSlotIndex = hostIdx;
+                }
+
+                Draft.hostDisplayName = string.IsNullOrWhiteSpace(_net.LocalDisplayName)
+                    ? (Draft.hostDisplayName ?? "")
+                    : _net.LocalDisplayName.Trim();
+            }
+
+            LobbySeatLogic.RefreshLegacyGuestFields(Draft);
+            if (string.IsNullOrEmpty(Draft.guestPeerId))
+                Draft.guestDisplayName = "";
+
             SyncSlotIndicesFromSeats();
             ClearAllReady();
             OnDraftChanged?.Invoke();
             if (_net.IsConnected)
                 BroadcastDraft();
             RecomputeCanStart();
-            _log.Info("[Lobby] Released seats for disconnected peers after abort count=" + toRelease.Count);
+            _log.Info("[Lobby] Reconcile seats live=" + live.Count + " released~=" + released);
+        }
+
+        /// <summary>Compat alias — prefer <see cref="ReconcileSeatsToConnectedPeers"/>.</summary>
+        public void ReleaseSeatsForDisconnectedPeers()
+        {
+            ReconcileSeatsToConnectedPeers();
         }
 
         public void NotifyDraftUiRefresh()

@@ -17,12 +17,13 @@ using System.Security.Cryptography;
 
 namespace AnnW.LanMp
 {
-    [BepInPlugin(PluginGuid, PluginName, PluginVersion)]
+    [BepInPlugin(PluginGuid, PluginName, LanMpVersion.Current)]
     public sealed class LanMpPlugin : BaseUnityPlugin
     {
         public const string PluginGuid = "annw.lanmp";
         public const string PluginName = "AnnW LAN Multiplayer";
-        public const string PluginVersion = "0.18.2";
+        /// <summary>Alias of <see cref="LanMpVersion.Current"/> — bump only in LanMpVersion.cs.</summary>
+        public const string PluginVersion = LanMpVersion.Current;
 
         internal static LanMpPlugin Instance { get; private set; }
         internal static ManualLogSource Log { get; private set; }
@@ -107,6 +108,7 @@ namespace AnnW.LanMp
             }
 
             Net = new NetSession(_lanLog);
+            Net.LocalPluginVersion = LanMpVersion.Current;
             Lobby = new LobbySession(Net, _lanLog);
             Authority = new AuthorityService(Lobby, Net, Log);
             Lobby.IsBattleStartedGate = () => Lobby.StartAuthorized || Authority.InLanBattle;

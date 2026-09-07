@@ -819,7 +819,11 @@ namespace AnnW.LanMp.Sync
                 cmd.moveDuration = 1f;
         }
 
-        private void ApplyResultAttachment(ResultAttachmentDto attach, string commandKind, bool snapPositions)
+        private void ApplyResultAttachment(
+            ResultAttachmentDto attach,
+            string commandKind,
+            bool snapPositions,
+            bool removeMissingUnits = true)
         {
             if (!ResultAttachmentCodec.HasPayload(attach))
                 return;
@@ -840,7 +844,8 @@ namespace AnnW.LanMp.Sync
                 _log,
                 snapPositions,
                 AttachmentApplyPolicy.ShouldApplyPlayerResources(mode),
-                seatFilter);
+                seatFilter,
+                removeMissingUnits);
         }
 
         /// <summary>
@@ -1820,14 +1825,50 @@ namespace AnnW.LanMp.Sync
                 ActionPresentation.FinishDoActionVisual(unit);
             }
 
-            ApplyResultAttachment(attachEarly, "DoAction", snapPositions: false);
+            // Combat kills are absent from CaptureBoard (Host already removed them) — present death
+            // before RemoveUnit/Dispose. BUILD/TRAIN orphans stay silent instant remove.
+            var isBuildLike = cate == ActionCate.BUILD || cate == ActionCate.TRAIN ||
+                              cate == ActionCate.QUICK_BUILD_MINER;
+            var doomed = !isBuildLike
+                ? ActionPresentation.CollectMissingUnits(idsBefore, attachEarly)
+                : null;
+            var deferOrphans = doomed != null && doomed.Count > 0;
+
+            ApplyResultAttachment(attachEarly, "DoAction", snapPositions: false,
+                removeMissingUnits: !deferOrphans);
+
+            if (deferOrphans)
+            {
+                foreach (var victim in doomed)
+                {
+                    if (victim == null || victim.dead)
+                        continue;
+                    ActionPresentation.KickUnitDeathVisual(victim, unit, victim.hp_cur, _log);
+                }
+
+                yield return CombatPresentationRules.DeathVisualLeadSeconds;
+
+                var hostIds = new HashSet<int>();
+                if (attachEarly?.units != null)
+                {
+                    foreach (var us in attachEarly.units)
+                    {
+                        if (us != null)
+                            hostIds.Add(us.unitId);
+                    }
+                }
+
+                using (SyncContext.BeginRemoteApply())
+                    ResultAttachmentBridge.RemoveUnitsMissingFromHost(hostIds, GS_Battle.self, _log);
+            }
+
             ActionPresentation.AfterAttachApply(attachEarly, _log, cmd, idsBefore);
             // ADR-001: Host attachment owns actioned/moved (factories may keep acting while bp_left>0).
             // Never force-spent after attach — that blocked Guest SET_TRAIN_POS / multi-TRAIN.
             EnsureUnitActedIfAbsentFromAttach(unit, attachEarly);
             ResultAttachmentBridge.RefreshUnactionedLists(_log);
             _log.LogInfo(
-                $"[Sync] Applied DoAction(attach-only/{tag}) unit={cmd.netUnitId} cate={cate} presentWait={wait:0.###}");
+                $"[Sync] Applied DoAction(attach-only/{tag}) unit={cmd.netUnitId} cate={cate} presentWait={wait:0.###} deaths={doomed?.Count ?? 0}");
         }
 
         private static void EnsureUnitActed(UnitData unit)

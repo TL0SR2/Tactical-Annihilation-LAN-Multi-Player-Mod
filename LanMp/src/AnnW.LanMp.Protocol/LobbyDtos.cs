@@ -24,7 +24,9 @@ namespace AnnW.LanMp.Protocol
         RoomFull = 3,
         NoHumanSlot = 4,
         /// <summary>Legacy Phase A; Phase B uses NoHumanSlot / RoomFull.</summary>
-        GuestSlotTaken = 5
+        GuestSlotTaken = 5,
+        /// <summary>AnnW.LanMp PluginVersion string mismatch (Hello/Welcome).</summary>
+        PluginVersionMismatch = 6
     }
 
     public enum SeatEditNackCode
@@ -111,6 +113,9 @@ namespace AnnW.LanMp.Protocol
         public int maxHumans;
         public int onlineHumans;
         public int joinableSlots;
+        /// <summary>Filled on PluginVersionMismatch for UI.</summary>
+        public string hostPluginVersion = "";
+        public string guestPluginVersion = "";
     }
 
     public class SeatEditRequest
@@ -150,6 +155,8 @@ namespace AnnW.LanMp.Protocol
         public string peerId;
         public int protocolVersion;
         public string displayName;
+        /// <summary>AnnW.LanMp assembly / PluginVersion (e.g. 0.18.3).</summary>
+        public string pluginVersion = "";
     }
 
     public class WelcomePayload
@@ -158,5 +165,6 @@ namespace AnnW.LanMp.Protocol
         public int protocolVersion;
         public string displayName;
         public int assignedSeatIndex = -1;
+        public string pluginVersion = "";
     }
 }

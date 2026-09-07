@@ -223,8 +223,12 @@ namespace AnnW.LanMp.Sync
             return snap;
         }
 
+        /// <param name="removeMissingUnits">
+        /// When false, skip orphan RemoveUnit so caller can play death VFX first (Guest attach-only combat).
+        /// </param>
         public static void Apply(ResultAttachmentDto dto, ManualLogSource log, bool snapPositions = true,
-            bool applyPlayerResources = true, int? playerResourceSeatFilter = null)
+            bool applyPlayerResources = true, int? playerResourceSeatFilter = null,
+            bool removeMissingUnits = true)
         {
             if (!ResultAttachmentCodec.HasPayload(dto))
                 return;
@@ -303,7 +307,20 @@ namespace AnnW.LanMp.Sync
                             GameAPI.self.MoveUnitInstantly(unit, new Inctor2(us.x, us.y));
 
                         if (System.Math.Abs(unit.hp_cur - us.hpCur) > 0.01f)
+                        {
+                            var oldHp = unit.hp_cur;
+                            // ADR-003 R4: attach-only skips Hurt — show damage % float here.
+                            if (us.hpCur < oldHp - 0.01f)
+                            {
+                                try
+                                {
+                                    AnnW.LanMp.Presentation.ActionPresentation.PresentHpDamageFloat(
+                                        unit, oldHp, us.hpCur, log);
+                                }
+                                catch { /* ignore */ }
+                            }
                             unit.hp_cur = us.hpCur;
+                        }
 
                         ApplyBuildingState(unit, us, log);
 
@@ -358,27 +375,9 @@ namespace AnnW.LanMp.Sync
                 }
 
                 // Drop Guest orphans created with divergent GenNewUnitID during local apply.
-                if (hostIds.Count > 0 && battle.all_unit?.units_alive != null && battle.turns >= 1)
-                {
-                    var orphans = new List<UnitData>();
-                    foreach (var u in battle.all_unit.units_alive)
-                    {
-                        if (u != null && !hostIds.Contains(u.unit_id))
-                            orphans.Add(u);
-                    }
-                    foreach (var u in orphans)
-                    {
-                        try
-                        {
-                            log?.LogInfo("[Attach] Removing orphan unit " + u.unit_id);
-                            GameAPI.self.RemoveUnit(u);
-                        }
-                        catch (System.Exception ex)
-                        {
-                            log?.LogWarning("[Attach] orphan remove: " + ex.Message);
-                        }
-                    }
-                }
+                // Combat attach-only may defer this so death VFX can run first.
+                if (removeMissingUnits)
+                    RemoveUnitsMissingFromHost(hostIds, battle, log);
 
                 if (dto.turn > 0)
                     battle.turns = dto.turn;
@@ -837,6 +836,41 @@ namespace AnnW.LanMp.Sync
         }
 
         private static long PackPos(int x, int y) => ((long)x << 32) ^ (uint)y;
+
+        /// <summary>
+        /// Remove local alive units absent from Host attachment id set (orphans / deferred combat kills).
+        /// </summary>
+        public static void RemoveUnitsMissingFromHost(
+            HashSet<int> hostIds,
+            GS_Battle battle = null,
+            ManualLogSource log = null)
+        {
+            if (hostIds == null || hostIds.Count == 0 || GameAPI.self == null)
+                return;
+            battle = battle ?? GS_Battle.self;
+            if (battle?.all_unit?.units_alive == null || battle.turns < 1)
+                return;
+
+            var orphans = new List<UnitData>();
+            foreach (var u in battle.all_unit.units_alive)
+            {
+                if (u != null && !hostIds.Contains(u.unit_id))
+                    orphans.Add(u);
+            }
+
+            foreach (var u in orphans)
+            {
+                try
+                {
+                    log?.LogInfo("[Attach] Removing orphan unit " + u.unit_id);
+                    GameAPI.self.RemoveUnit(u);
+                }
+                catch (Exception ex)
+                {
+                    log?.LogWarning("[Attach] orphan remove: " + ex.Message);
+                }
+            }
+        }
 
         /// <summary>
         /// Vanilla EndTurn popup reads Player.unactioned_units cache; setting actioned alone is not enough.

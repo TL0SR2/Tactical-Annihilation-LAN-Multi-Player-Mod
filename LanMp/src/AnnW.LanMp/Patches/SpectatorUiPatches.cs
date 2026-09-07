@@ -191,19 +191,12 @@ namespace AnnW.LanMp.Patches
 
         private static string ResolveOperatorName(Player cur)
         {
-            var plugin = LanMpPlugin.Instance;
-            var draft = plugin?.Lobby?.Draft;
-            if (draft?.seats != null && cur.index >= 0 && cur.index < draft.seats.Length)
-            {
-                var seat = draft.seats[cur.index];
-                if (seat != null && !string.IsNullOrWhiteSpace(seat.occupantName))
-                    return seat.occupantName.Trim();
-                if (seat != null
-                    && !string.IsNullOrEmpty(seat.peerId)
-                    && seat.peerId == draft.hostPeerId
-                    && !string.IsNullOrWhiteSpace(draft.hostDisplayName))
-                    return draft.hostDisplayName.Trim();
-            }
+            if (cur == null)
+                return "?";
+
+            var lanName = LanPlayerNames.TryResolveSeatDisplayName(cur.index);
+            if (!string.IsNullOrEmpty(lanName))
+                return lanName;
 
             try
             {

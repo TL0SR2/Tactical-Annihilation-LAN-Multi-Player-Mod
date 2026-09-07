@@ -48,9 +48,11 @@ namespace AnnW.LanMp.Protocol
         private readonly string _localPeerId;
         private volatile bool _welcomeReceived;
         private PeerConn _guestLink;
-        // Host CaptureBoard / AI skip bursts can stall the main thread for many seconds;
-        // 8s idle kill dropped Guests mid-hitch and looked like "Intent never arrived".
+        // Host CaptureBoard / AI skip / LoadScene can stall the main thread for many seconds;
+        // wall-clock idle kill dropped peers mid-hitch (Start Battle looked like mutual disconnect).
         private const int HeartbeatTimeoutMs = 30000;
+        private int _graceStartTickMs;
+        private int _graceDurationMs;
 
         private struct PendingHello
         {
@@ -106,6 +108,8 @@ namespace AnnW.LanMp.Protocol
         private string _guestHostDisplayName = "";
 
         public string LocalDisplayName { get; set; } = "";
+        /// <summary>AnnW.LanMp PluginVersion stamped into Hello/Welcome.</summary>
+        public string LocalPluginVersion { get; set; } = LanMpVersion.Current;
 
         public string RemoteDisplayName
         {
@@ -223,10 +227,24 @@ namespace AnnW.LanMp.Protocol
                     try
                     {
                         var w = JsonUtil.FromJson<WelcomePayload>(env.PayloadJson);
-                        _guestHostPeerId = w.peerId;
-                        _guestHostDisplayName = w.displayName ?? "";
+                        if (w != null &&
+                            !PluginVersionRules.IsCompatible(LocalPluginVersion, w.pluginVersion))
+                        {
+                            // Host should have rejected already; belt-and-suspenders for old hosts.
+                            LastReject = PluginVersionRules.MakeMismatchReject(
+                                w.pluginVersion, LocalPluginVersion);
+                            _log.Warn("[Net] Welcome plugin version mismatch — disconnecting");
+                            try { OnLobbyRejected?.Invoke(LastReject); }
+                            catch { /* ignore */ }
+                            Disconnect("plugin-version-mismatch");
+                            continue;
+                        }
+
+                        _guestHostPeerId = w?.peerId;
+                        _guestHostDisplayName = w?.displayName ?? "";
                         _welcomeReceived = true;
-                        _log.Info("[Net] Welcome from peer=" + _guestHostPeerId + " name=" + _guestHostDisplayName);
+                        _log.Info("[Net] Welcome from peer=" + _guestHostPeerId + " name=" +
+                                  _guestHostDisplayName + " plugin=" + (w?.pluginVersion ?? ""));
                         OnConnected?.Invoke();
                     }
                     catch { /* ignore */ }
@@ -257,6 +275,11 @@ namespace AnnW.LanMp.Protocol
         {
             if (Role == PeerRole.None)
                 return;
+
+            // Keep recv clocks fresh while grace is active so the first CheckIdle after a
+            // LoadScene hitch does not instantly heartbeat-timeout both peers.
+            if (IsTransportGraceActive())
+                RefreshAllPeerRecvClocks();
 
             if (Role == PeerRole.Guest)
             {
@@ -323,8 +346,60 @@ namespace AnnW.LanMp.Protocol
             }
         }
 
+        /// <summary>
+        /// Pause wall-clock heartbeat kills (LobbyStart → Battle LoadScene, CaptureBoard hitch).
+        /// </summary>
+        public void BeginTransportGraceMs(int durationMs)
+        {
+            if (durationMs < 0)
+                durationMs = 0;
+            _graceStartTickMs = Environment.TickCount;
+            if (_graceStartTickMs == 0)
+                _graceStartTickMs = 1;
+            _graceDurationMs = durationMs;
+            RefreshAllPeerRecvClocks();
+            _log.Info("[Net] Transport grace " + durationMs + "ms");
+        }
+
+        public void ClearTransportGrace()
+        {
+            _graceDurationMs = 0;
+        }
+
+        public bool IsTransportGraceActive()
+        {
+            if (_graceDurationMs <= 0)
+                return false;
+            var elapsed = Environment.TickCount - _graceStartTickMs;
+            if (elapsed < 0)
+                elapsed = int.MaxValue; // TickCount wrap
+            if (elapsed >= _graceDurationMs)
+            {
+                _graceDurationMs = 0;
+                RefreshAllPeerRecvClocks();
+                return false;
+            }
+            return true;
+        }
+
+        private void RefreshAllPeerRecvClocks()
+        {
+            if (Role == PeerRole.Guest)
+            {
+                NoteRecv(_guestLink);
+                return;
+            }
+            lock (_peersLock)
+            {
+                foreach (var p in _peersByConn.Values)
+                    NoteRecv(p);
+            }
+        }
+
         private void CheckIdle(PeerConn peer, PeerConn dropTarget)
         {
+            if (IsTransportGraceActive())
+                return;
             if (peer == null || peer.LastRecvTickMs <= 0)
                 return;
             var idle = Environment.TickCount - peer.LastRecvTickMs;
@@ -427,7 +502,8 @@ namespace AnnW.LanMp.Protocol
                 {
                     peerId = _localPeerId,
                     protocolVersion = ProtocolVersion,
-                    displayName = LocalDisplayName ?? ""
+                    displayName = LocalDisplayName ?? "",
+                    pluginVersion = LocalPluginVersion ?? ""
                 })
             });
         }
@@ -930,6 +1006,15 @@ namespace AnnW.LanMp.Protocol
                 return false;
             }
 
+            if (!PluginVersionRules.IsCompatible(LocalPluginVersion, hello.pluginVersion))
+            {
+                var mismatch = PluginVersionRules.MakeMismatchReject(LocalPluginVersion, hello.pluginVersion);
+                _log.Warn("[Net] Plugin version mismatch host=" + (LocalPluginVersion ?? "") +
+                          " guest=" + (hello.pluginVersion ?? ""));
+                SendRejectAndDropConn(peer, mismatch);
+                return false;
+            }
+
             // Already admitted same peerId (reconnect): silently supersede old conn — do not
             // FirePeerDisconnected (would release seat) or Remove from maps under new peer.
             PeerConn existing = null;
@@ -988,6 +1073,7 @@ namespace AnnW.LanMp.Protocol
                     peerId = _localPeerId,
                     protocolVersion = ProtocolVersion,
                     displayName = LocalDisplayName ?? "",
+                    pluginVersion = LocalPluginVersion ?? "",
                     assignedSeatIndex = -1
                 })
             });

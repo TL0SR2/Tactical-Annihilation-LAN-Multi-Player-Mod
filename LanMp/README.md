@@ -2,7 +2,11 @@
 
 遭遇战局域网联机插件源码（设计见 `../docs/lan-mp/`）。
 
-当前版本：**0.18.2**（`Plugin.cs` → `PluginVersion`）。
+当前版本：**0.18.3**（唯一源：`LanMpVersion.Current` / `src/AnnW.LanMp.Protocol/LanMpVersion.cs`）。
+
+升版：只改 `LanMpVersion.Current`，或执行  
+`powershell -File LanMp\tools\Sync-Version.ps1 -Version x.y.z`（会同步本 README）。  
+`Pack-Release.ps1` 打包前也会自动 Sync。
 
 ## 版本管理（Git）
 
