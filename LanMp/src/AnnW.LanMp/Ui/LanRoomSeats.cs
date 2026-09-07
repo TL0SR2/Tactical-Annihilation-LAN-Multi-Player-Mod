@@ -128,10 +128,10 @@ namespace AnnW.LanMp.Ui
                         LanSeatCell.AddStatic(row, "Diff", ColDiff, "—");
                     }
 
-                    // Economy multiplier — Host only (all seats).
+                    // Economy multiplier — Host only (all seats). LAN ladder up to ×100.
                     {
                         var ecoOpts = BuildResMulOptions();
-                        var resTable = GameCompatProbe.ResMulOptionsLive();
+                        var resTable = GameCompatProbe.LanResMulOptionsLive();
                         var ecoId = GameCompatProbe.IndexOfNearest(
                             resTable,
                             seat.resPercent > 0f ? seat.resPercent : SkirmishSeatEconomy.DefaultResPercent);
@@ -275,7 +275,7 @@ namespace AnnW.LanMp.Ui
         private static List<LanDropMenu.Option> BuildResMulOptions()
         {
             var list = new List<LanDropMenu.Option>();
-            var opts = GameCompatProbe.ResMulOptionsLive();
+            var opts = GameCompatProbe.LanResMulOptionsLive();
             for (var i = 0; i < opts.Length; i++)
             {
                 var v = opts[i];

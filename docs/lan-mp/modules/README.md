@@ -12,3 +12,4 @@
 | — | [M04-appendix-mutation-candidates.md](./M04-appendix-mutation-candidates.md) | 审计表 | |
 | M05 | [M05-state-checksum.md](./M05-state-checksum.md) | P5 MVP 必含 | ADR-003 |
 | M06 | [M06-injection-host.md](./M06-injection-host.md) | P1 | ADR-002 |
+| M07 | [M07-co-skills.md](./M07-co-skills.md) | CO 技能/被动 | ADR-005；**DRAFT 待审** |

@@ -43,6 +43,12 @@ namespace AnnW.LanMp.Protocol
         public LobbyRejectPayload LastReject { get; private set; }
 
         public Func<IList<string>> CoPoolProvider { get; set; }
+
+        /// <summary>
+        /// Host-only: after BakeForStart, stamp skillId/psIds from game tables (ADR-005).
+        /// Set by plugin (<c>CoLoadoutResolver.StampDraft</c>).
+        /// </summary>
+        public Action<LobbyDraftDto> AfterBakeCoLoadout { get; set; }
         public Func<bool> IsBattleStartedGate { get; set; }
 
         public event Action OnDraftChanged;
@@ -186,6 +192,12 @@ namespace AnnW.LanMp.Protocol
                 throw new InvalidOperationException("Not all ready");
 
             LobbySeatLogic.BakeForStart(Draft, battleSeed, CoPoolProvider?.Invoke());
+            try { AfterBakeCoLoadout?.Invoke(Draft); }
+            catch (Exception ex)
+            {
+                _log.Error("[Lobby] AfterBakeCoLoadout failed: " + ex.Message);
+                throw;
+            }
             SyncSlotIndicesFromSeats();
 
             BattleId = Guid.NewGuid().ToString("N");
@@ -310,6 +322,14 @@ namespace AnnW.LanMp.Protocol
                 ClearAllReady();
             else
                 ClearPeerReady(req.peerId);
+            if (req.setCoId)
+            {
+                try { AfterBakeCoLoadout?.Invoke(Draft); }
+                catch (Exception ex)
+                {
+                    _log.Warn("[Lobby] re-stamp CO loadout after SeatEdit: " + ex.Message);
+                }
+            }
             SyncSlotIndicesFromSeats();
             OnDraftChanged?.Invoke();
             if (_net.IsConnected)
@@ -370,6 +390,14 @@ namespace AnnW.LanMp.Protocol
                         break;
                     }
                     ClearPeerReady(req.peerId);
+                    if (req.setCoId)
+                    {
+                        try { AfterBakeCoLoadout?.Invoke(Draft); }
+                        catch (Exception ex)
+                        {
+                            _log.Warn("[Lobby] re-stamp CO loadout after Guest SeatEdit: " + ex.Message);
+                        }
+                    }
                     SyncSlotIndicesFromSeats();
                     OnDraftChanged?.Invoke();
                     BroadcastDraft();

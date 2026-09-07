@@ -55,6 +55,15 @@ namespace AnnW.LanMp.Protocol
         public int posMode;
         public int pos;
         public string coId = "";
+        /// <summary>
+        /// Host-authored active skill id (SD_ANNW_SKILL.name). Empty = no skill.
+        /// Stamped at Bake/LobbyStart — Guest must not resolve via local GS_CO archive (ADR-005).
+        /// </summary>
+        public string skillId = "";
+        /// <summary>
+        /// Host-authored passive ids (SD_ANNW_PS.name). Empty array = none; null treated as none on apply.
+        /// </summary>
+        public string[] psIds;
         /// <summary>Human occupant display name; empty for AI / standby.</summary>
         public string occupantName = "";
         /// <summary>

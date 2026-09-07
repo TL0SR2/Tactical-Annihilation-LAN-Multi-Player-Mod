@@ -20,7 +20,8 @@ namespace AnnW.LanMp.Protocol
             bool isLocalHumanTurn,
             bool hasLocalHumanSeat)
         {
-            if (commandKind == "EndTurn")
+            // EndTurn + CastSkill: full board (skills may spend/grant metal/power for any seat).
+            if (commandKind == "EndTurn" || commandKind == "CastSkill")
                 return ResourceApplyMode.AllPlayers;
             if (isGuest && hasLocalHumanSeat && isLocalHumanTurn &&
                 (commandKind == "DoAction" || commandKind == "UnitMoved" || commandKind == "Undo"))

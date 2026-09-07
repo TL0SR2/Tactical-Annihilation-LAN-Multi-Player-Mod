@@ -443,9 +443,8 @@ namespace AnnW.LanMp.Protocol
                     message = "resPercent host-only";
                     return false;
                 }
-                seat.resPercent = req.resPercent > 0f
-                    ? req.resPercent
-                    : SkirmishSeatEconomy.DefaultResPercent;
+                seat.resPercent = SkirmishSeatEconomy.ClampLanResPercent(
+                    req.resPercent > 0f ? req.resPercent : SkirmishSeatEconomy.DefaultResPercent);
                 // Editing eco on a preset AI slot promotes to Custom so SetupForSkirmish applies SGS values.
                 if (st == LobbySeatState.Ai || st == LobbySeatState.HumanStandby)
                 {
@@ -553,7 +552,15 @@ namespace AnnW.LanMp.Protocol
                     message = "co";
                     return false;
                 }
-                seat.coId = req.coId ?? "";
+                var nextCo = req.coId ?? "";
+                if (!string.Equals(seat.coId, nextCo, StringComparison.Ordinal))
+                {
+                    seat.coId = nextCo;
+                    // Stale skill/PS must not survive CO swap; Host re-stamps via AfterBake / seat hook.
+                    CoLoadoutRules.Clear(seat);
+                }
+                else
+                    seat.coId = nextCo;
             }
 
             return true;
@@ -606,6 +613,10 @@ namespace AnnW.LanMp.Protocol
 
                 if (string.IsNullOrEmpty(s.coId) && coPool != null && coPool.Count > 0)
                     s.coId = coPool[rng.Next(coPool.Count)];
+
+                // skillId/psIds stamped by Host AfterBakeCoLoadout (plugin) — clear stale ids when CO cleared.
+                if (string.IsNullOrEmpty(s.coId) || s.coId == "__none__")
+                    CoLoadoutRules.Clear(s);
             }
         }
 

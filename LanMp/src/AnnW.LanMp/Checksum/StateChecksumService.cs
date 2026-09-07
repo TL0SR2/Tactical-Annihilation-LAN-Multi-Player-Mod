@@ -110,8 +110,12 @@ namespace AnnW.LanMp.Checksum
                 {
                     if (p == null) continue;
                     sb.Append('p').Append(p.index).Append(':')
-                        .Append(p.metal).Append(',').Append(p.power).Append(',').Append(p.defeated ? 1 : 0)
-                        .Append(';');
+                        .Append(p.metal).Append(',').Append(p.power).Append(',').Append(p.defeated ? 1 : 0);
+                    if (p.coEnergy >= 0f)
+                        sb.Append(",e=").Append(p.coEnergy.ToString("0.###", CultureInfo.InvariantCulture));
+                    if (p.skillUsedTimes >= 0)
+                        sb.Append(",su=").Append(p.skillUsedTimes);
+                    sb.Append(';');
                 }
             }
             if (board.units != null)

@@ -315,6 +315,28 @@ namespace AnnW.LanMp.Tests
         }
 
         [Fact]
+        public void LanResMul_extends_to_100x_and_clamps()
+        {
+            Assert.Equal(100f, SkirmishSeatEconomy.LanMaxResPercent, 3);
+            Assert.Equal(
+                new float[] { 5f, 10f, 20f, 30f, 50f, 80f, 100f },
+                SkirmishSeatEconomy.LanExtraResMulOptions);
+            Assert.Equal(100f, SkirmishSeatEconomy.LanResMulOptions[SkirmishSeatEconomy.LanResMulOptions.Length - 1], 3);
+            Assert.Equal(
+                SkirmishSeatEconomy.ResMulOptions.Length + SkirmishSeatEconomy.LanExtraResMulOptions.Length,
+                SkirmishSeatEconomy.LanResMulOptions.Length);
+            Assert.Equal(100f, SkirmishSeatEconomy.ClampLanResPercent(999f), 3);
+            Assert.Equal(1f, SkirmishSeatEconomy.ClampLanResPercent(0f), 3);
+
+            var seat = LobbySeatLogic.MakeAiSeat(0, 0, 0, "", 3);
+            seat.resPercent = 100f;
+            var stamp = SkirmishSeatEconomy.ResolveForStart(seat, humanSeated: false);
+            Assert.Equal(SkirmishSeatEconomy.ControllerCustom, stamp.controller);
+            Assert.Equal(100f, stamp.resPercent, 3);
+            Assert.Equal(100f, SkirmishSeatEconomy.ResolveEffectiveResMul(100f, 6), 3);
+        }
+
+        [Fact]
         public void DefaultAiController_is_AI_Normal()
         {
             Assert.Equal(3, LobbySeatLogic.DefaultAiController);

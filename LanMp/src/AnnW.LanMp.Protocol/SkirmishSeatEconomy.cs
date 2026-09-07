@@ -14,11 +14,23 @@ namespace AnnW.LanMp.Protocol
         /// <summary>PlayerControl.Human</summary>
         public const int ControllerHuman = 0;
 
-        /// <summary>Vanilla DataUtils.SkirmishResMulOptions.</summary>
+        /// <summary>Vanilla DataUtils.SkirmishResMulOptions (CompatProbe / solo parity).</summary>
         public static readonly float[] ResMulOptions =
         {
             0.5f, 0.7f, 0.8f, 0.9f, 1f, 1.1f, 1.2f, 1.3f, 1.4f, 1.5f, 1.6f, 1.8f, 2f, 2.5f, 3f
         };
+
+        /// <summary>
+        /// LAN-plugin-only eco steps beyond vanilla (appended after live SkirmishResMulOptions).
+        /// Host lobby Eco: ×5…×100 (= 500%…10000%) above vanilla max ×3.
+        /// </summary>
+        public static readonly float[] LanExtraResMulOptions =
+        {
+            5f, 10f, 20f, 30f, 50f, 80f, 100f
+        };
+
+        /// <summary>LAN lobby Eco ceiling (100× / 10000%).</summary>
+        public const float LanMaxResPercent = 100f;
 
         /// <summary>Vanilla DataUtils.SkirmishAIIntelOptions.</summary>
         public static readonly float[] AiIntelOptions =
@@ -30,6 +42,9 @@ namespace AnnW.LanMp.Protocol
         public const float DefaultAiIntelligence = 0.7f; // AI_Normal
         /// <summary>Vanilla SetupForSkirmish Custom branch when ai_interlligence ≤ 0.</summary>
         public const float VanillaCustomAiIntelligenceFallback = 1f;
+
+        /// <summary>Cached vanilla+LAN eco ladder (fallback when game table unreadable).</summary>
+        public static readonly float[] LanResMulOptions = BuildLanResMulOptions(ResMulOptions);
 
         /// <summary>
         /// Authoritative values stamped onto SGS_Player so GS_Battle.SetupForSkirmish
@@ -73,6 +88,8 @@ namespace AnnW.LanMp.Protocol
 
         public static int IndexOfResMul(float value) => NearestIndex(ResMulOptions, value);
 
+        public static int IndexOfLanResMul(float value) => NearestIndex(LanResMulOptions, value);
+
         public static int IndexOfAiIntel(float value) => NearestIndex(AiIntelOptions, value);
 
         public static float ResMulAt(int index)
@@ -80,6 +97,56 @@ namespace AnnW.LanMp.Protocol
             if (index < 0 || index >= ResMulOptions.Length)
                 return DefaultResPercent;
             return ResMulOptions[index];
+        }
+
+        public static float LanResMulAt(int index)
+        {
+            if (index < 0 || index >= LanResMulOptions.Length)
+                return DefaultResPercent;
+            return LanResMulOptions[index];
+        }
+
+        /// <summary>
+        /// Merge vanilla ladder with LAN-only high multipliers (values &gt; vanilla max, ≤ <see cref="LanMaxResPercent"/>).
+        /// </summary>
+        public static float[] BuildLanResMulOptions(float[] vanillaBase)
+        {
+            var baseOpts = vanillaBase != null && vanillaBase.Length > 0 ? vanillaBase : ResMulOptions;
+            var maxVanilla = 0f;
+            for (var i = 0; i < baseOpts.Length; i++)
+            {
+                if (baseOpts[i] > maxVanilla)
+                    maxVanilla = baseOpts[i];
+            }
+
+            var extras = 0;
+            for (var i = 0; i < LanExtraResMulOptions.Length; i++)
+            {
+                var v = LanExtraResMulOptions[i];
+                if (v > maxVanilla + 0.001f && v <= LanMaxResPercent + 0.001f)
+                    extras++;
+            }
+
+            var merged = new float[baseOpts.Length + extras];
+            Array.Copy(baseOpts, merged, baseOpts.Length);
+            var w = baseOpts.Length;
+            for (var i = 0; i < LanExtraResMulOptions.Length; i++)
+            {
+                var v = LanExtraResMulOptions[i];
+                if (v > maxVanilla + 0.001f && v <= LanMaxResPercent + 0.001f)
+                    merged[w++] = v;
+            }
+            return merged;
+        }
+
+        /// <summary>Host SeatEdit: keep eco in (0, LanMaxResPercent].</summary>
+        public static float ClampLanResPercent(float value)
+        {
+            if (value <= 0f)
+                return DefaultResPercent;
+            if (value > LanMaxResPercent)
+                return LanMaxResPercent;
+            return value;
         }
 
         public static float AiIntelAt(int index)

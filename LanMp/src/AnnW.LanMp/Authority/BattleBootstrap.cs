@@ -144,9 +144,11 @@ namespace AnnW.LanMp.Authority
                     skill = null
                 };
 
+                LobbySeatDto seatForLoadout = null;
                 if (draft.seats != null && i < draft.seats.Length && draft.seats[i] != null)
                 {
                     var seat = draft.seats[i];
+                    seatForLoadout = seat;
                     var st = LobbySeatLogic.GetState(seat);
                     if (st == LobbySeatState.Disabled || !seat.exist)
                     {
@@ -197,6 +199,19 @@ namespace AnnW.LanMp.Authority
                     p.controller = PlayerControl.AI_Normal;
                     p.res_percent = SkirmishSeatEconomy.GetPresetResMul(3);
                     p.ai_interlligence = SkirmishSeatEconomy.GetPresetAiIntelligence(3);
+                }
+
+                // ADR-005: Host-stamped skill/PS (or table-default fallback).
+                try
+                {
+                    CoLoadoutResolver.ApplyToSgsPlayer(p, seatForLoadout, log);
+                    log?.LogInfo(
+                        $"[Bootstrap] SGS[{i}] co={p.sd_co} skill={(p.skill != null ? p.skill.name : "null")} " +
+                        $"ps={(p.ps_list != null ? p.ps_list.Count : 0)}");
+                }
+                catch (Exception ex)
+                {
+                    log?.LogWarning("[Bootstrap] CO loadout: " + ex.Message);
                 }
 
                 sgs.players.Add(p);

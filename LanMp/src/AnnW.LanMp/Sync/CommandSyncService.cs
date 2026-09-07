@@ -37,6 +37,9 @@ namespace AnnW.LanMp.Sync
         private bool _eventsHooked;
         private CommandDto _pendingSkillCommand;
         private bool _skillCastSuppressEmit;
+        private float _skillCastSuppressSince;
+        /// <summary>Host: Guest Intent cast must finish or watchdog clears Suppress (B4).</summary>
+        private const float HostSkillCastWatchdogSec = 45f;
         private int _actionEmitDepth;
         private int _pendingActionUnitId = -1;
         private ActionCate _pendingActionCate;
@@ -114,7 +117,10 @@ namespace AnnW.LanMp.Sync
             ClearGuestAwait();
         }
 
-        public void Tick(float dt) { }
+        public void Tick(float dt)
+        {
+            TickHostSkillCastWatchdog();
+        }
 
         public void OnSceneChanged(string sceneName)
         {
@@ -150,6 +156,7 @@ namespace AnnW.LanMp.Sync
                 BattleEventBus.self.OnActionExecuted += OnActionExecuted;
                 BattleEventBus.self.OnUnitMoved += OnUnitMoved;
                 BattleEventBus.self.OnSkillCastDone += OnSkillCastDone;
+                BattleEventBus.self.OnSkillCastStarted += OnSkillCastStarted;
                 BattleEventBus.self.OnUnitCreated += OnUnitCreated;
                 BattleEventBus.self.OnUnitRemoved += OnUnitRemoved;
                 BattleEventBus.self.OnUnitBuildCompleted += OnUnitBuildCompleted;
@@ -174,6 +181,7 @@ namespace AnnW.LanMp.Sync
                 BattleEventBus.self.OnActionExecuted -= OnActionExecuted;
                 BattleEventBus.self.OnUnitMoved -= OnUnitMoved;
                 BattleEventBus.self.OnSkillCastDone -= OnSkillCastDone;
+                BattleEventBus.self.OnSkillCastStarted -= OnSkillCastStarted;
                 BattleEventBus.self.OnUnitCreated -= OnUnitCreated;
                 BattleEventBus.self.OnUnitRemoved -= OnUnitRemoved;
                 BattleEventBus.self.OnUnitBuildCompleted -= OnUnitBuildCompleted;
@@ -181,6 +189,114 @@ namespace AnnW.LanMp.Sync
             catch { /* ignore */ }
             _eventsHooked = false;
             _actionEmitDepth = 0;
+            AbortHostSkillCastWatchdog("unhook", nackGuest: false);
+        }
+
+        /// <summary>
+        /// Host local / AI / Guest-Intent: suppress CreateUnit bus emit during skill so summons
+        /// fold into CastSkill CaptureBoard (audit B3).
+        /// </summary>
+        private void OnSkillCastStarted()
+        {
+            if (_net.Role != PeerRole.Host)
+                return;
+            if (_authority == null || !_authority.InLanBattle)
+                return;
+            BeginSkillCastSuppress("cast-started");
+        }
+
+        private void BeginSkillCastSuppress(string reason)
+        {
+            _skillCastSuppressEmit = true;
+            SyncContext.SuppressNetworkEmit = true;
+            _skillCastSuppressSince = Time.unscaledTime;
+            _log.LogInfo("[Sync] Skill cast suppress ON (" + reason + ")");
+        }
+
+        private void ClearSkillCastSuppress(string reason)
+        {
+            if (!_skillCastSuppressEmit && !SyncContext.SuppressNetworkEmit)
+                return;
+            _skillCastSuppressEmit = false;
+            SyncContext.SuppressNetworkEmit = false;
+            _skillCastSuppressSince = 0f;
+            _log.LogInfo("[Sync] Skill cast suppress OFF (" + reason + ")");
+        }
+
+        private void TickHostSkillCastWatchdog()
+        {
+            if (_net.Role != PeerRole.Host)
+                return;
+            if (!_skillCastSuppressEmit && _pendingSkillCommand == null)
+                return;
+            if (_skillCastSuppressSince <= 0.01f)
+                return;
+            if (Time.unscaledTime - _skillCastSuppressSince < HostSkillCastWatchdogSec)
+                return;
+            AbortHostSkillCastWatchdog("watchdog-timeout", nackGuest: true);
+        }
+
+        /// <summary>B4: clear Suppress / pending; Nack Guest Intent if still waiting.</summary>
+        private void AbortHostSkillCastWatchdog(string reason, bool nackGuest)
+        {
+            var pending = _pendingSkillCommand;
+            _pendingSkillCommand = null;
+            ClearSkillCastSuppress(reason);
+            if (!nackGuest || pending == null || string.IsNullOrEmpty(pending.sourceIntentId))
+                return;
+            _nackGuestOnReject = true;
+            try
+            {
+                if (_intentSourcePeer.TryGetValue(pending.sourceIntentId, out var peer))
+                    _nackTargetPeerId = peer;
+                SendIntentNack(pending.sourceIntentId, "skill-timeout", "技能施放超时，请重试");
+            }
+            finally
+            {
+                _nackGuestOnReject = false;
+                _nackTargetPeerId = null;
+                _intentSourcePeer.Remove(pending.sourceIntentId);
+            }
+            _log.LogWarning("[Sync] CastSkill aborted (" + reason + ") intent=" + pending.sourceIntentId);
+        }
+
+        private void OnSkillCastDone()
+        {
+            if (_net.Role != PeerRole.Host)
+                return;
+            if (_authority == null || !_authority.InLanBattle)
+                return;
+            if (!_net.IsConnected)
+            {
+                AbortHostSkillCastWatchdog("not-connected", nackGuest: true);
+                FailBroadcastAfterApply("CastSkill", "not-connected");
+                return;
+            }
+
+            CommandDto cmd;
+            if (_pendingSkillCommand != null)
+            {
+                cmd = _pendingSkillCommand;
+                _pendingSkillCommand = null;
+            }
+            else
+            {
+                var battle = GS_Battle.self;
+                cmd = new CommandDto
+                {
+                    battleId = LanMpPlugin.Instance?.Lobby?.BattleId,
+                    turn = battle != null ? battle.turns : 0,
+                    playerIndex = battle?.cur_player != null ? battle.cur_player.index : -1,
+                    kind = "CastSkill",
+                    targetX = 0,
+                    targetY = 0
+                };
+            }
+
+            // Must clear suppress before ShouldEmitFromBus / Broadcast (Host local path).
+            ClearSkillCastSuppress("cast-done");
+            HostBroadcastCommand(cmd);
+            _log.LogInfo("[Sync] CastSkill command after cast done");
         }
 
         /// <summary>Guest: RemoteWatch until Host EndTurn (TurnAuthority).</summary>
@@ -425,46 +541,6 @@ namespace AnnW.LanMp.Sync
                 return false;
             }
             return true;
-        }
-
-        private void OnSkillCastDone()
-        {
-            if (_net.Role != PeerRole.Host)
-                return;
-            if (_authority == null || !_authority.InLanBattle)
-                return;
-            if (!_net.IsConnected)
-            {
-                FailBroadcastAfterApply("CastSkill", "not-connected");
-                return;
-            }
-
-            CommandDto cmd;
-            if (_pendingSkillCommand != null)
-            {
-                cmd = _pendingSkillCommand;
-                _pendingSkillCommand = null;
-                _skillCastSuppressEmit = false;
-                SyncContext.SuppressNetworkEmit = false;
-            }
-            else if (ShouldEmitFromBus())
-            {
-                var battle = GS_Battle.self;
-                cmd = new CommandDto
-                {
-                    battleId = LanMpPlugin.Instance?.Lobby?.BattleId,
-                    turn = battle != null ? battle.turns : 0,
-                    playerIndex = battle?.cur_player != null ? battle.cur_player.index : -1,
-                    kind = "CastSkill",
-                    targetX = 0,
-                    targetY = 0
-                };
-            }
-            else
-                return;
-
-            HostBroadcastCommand(cmd);
-            _log.LogInfo("[Sync] CastSkill command after cast done");
         }
 
         public IntentDto BuildIntent(string kind, UnitData unit = null, ActionCate? cate = null, Inctor2? target = null, Inctor2? from = null)
@@ -994,7 +1070,7 @@ namespace AnnW.LanMp.Sync
             {
                 if (!TryBeginHostSkillCast(cmd))
                 {
-                    SendIntentNack(intent.intentId, "skill-unavailable", "无法释放指挥官技能");
+                    SendIntentNack(intent.intentId, "skill-unavailable", "无法释放指挥官技能（能量未满或技能不可用）");
                     return;
                 }
                 return;
@@ -1221,10 +1297,24 @@ namespace AnnW.LanMp.Sync
                 _log.LogWarning("[Sync] CastSkill missing UX/CO skill_action");
                 return false;
             }
+            try
+            {
+                // Keep energy_max in sync before gate (Host local AfterSkillCast already does).
+                co.energy_max = CoEnergyRules.ComputeEnergyMax(co.skill_used_times);
+                if (!CoEnergyRules.IsEnergyFull(co.energy, co.energy_max))
+                {
+                    _log.LogWarning("[Sync] CastSkill rejected — energy not full");
+                    return false;
+                }
+            }
+            catch (Exception ex)
+            {
+                _log.LogWarning("[Sync] CastSkill energy gate: " + ex.Message);
+                return false;
+            }
 
             _pendingSkillCommand = cmd;
-            _skillCastSuppressEmit = true;
-            SyncContext.SuppressNetworkEmit = true;
+            BeginSkillCastSuppress("guest-intent");
             try
             {
                 var pos = new Inctor2(cmd.targetX, cmd.targetY);
@@ -1243,8 +1333,7 @@ namespace AnnW.LanMp.Sync
             catch (Exception ex)
             {
                 _pendingSkillCommand = null;
-                _skillCastSuppressEmit = false;
-                SyncContext.SuppressNetworkEmit = false;
+                ClearSkillCastSuppress("guest-intent-fail");
                 _log.LogError("[Sync] BeginHostSkillCast: " + ex);
                 return false;
             }
@@ -1473,9 +1562,9 @@ namespace AnnW.LanMp.Sync
                 {
                     var attach = ResultAttachmentCodec.FromJson(cmd.resultAttachmentJson);
                     if (ResultAttachmentCodec.HasPayload(attach) &&
-                        cmd.kind != "DoAction") // DoAction attach-only may already apply
+                        cmd.kind != "DoAction" && cmd.kind != "CastSkill")
                     {
-                        // DoAction BUILD attach-only already applied; other DoAction may need snap after anim
+                        // DoAction / CastSkill apply inside their attach-only coroutines.
                     }
                     if (ResultAttachmentCodec.HasPayload(attach) && cmd.kind == "UnitMoved")
                         ApplyResultAttachment(attach, cmd.kind, snapPositions: false);
@@ -1622,7 +1711,7 @@ namespace AnnW.LanMp.Sync
 
         private static bool NeedsAnimatedApply(string kind)
         {
-            return kind == "DoAction" || kind == "UnitMoved";
+            return kind == "DoAction" || kind == "UnitMoved" || kind == "CastSkill";
         }
 
         private bool TryStartCoroutine(IEnumerator routine)
@@ -1658,6 +1747,9 @@ namespace AnnW.LanMp.Sync
                     break;
                 case "UnitMoved":
                     yield return CoApplyUnitMoved(cmd);
+                    break;
+                case "CastSkill":
+                    yield return CoApplyCastSkillAttachOnly(cmd);
                     break;
                 default:
                     ApplyCommandBodyInstant(cmd);
@@ -1869,6 +1961,71 @@ namespace AnnW.LanMp.Sync
             ResultAttachmentBridge.RefreshUnactionedLists(_log);
             _log.LogInfo(
                 $"[Sync] Applied DoAction(attach-only/{tag}) unit={cmd.netUnitId} cate={cate} presentWait={wait:0.###} deaths={doomed?.Count ?? 0}");
+        }
+
+        /// <summary>
+        /// Guest CastSkill: attach-only + death/summon presentation (audit B1/B7/B8) + FOW refresh (B6).
+        /// </summary>
+        private IEnumerator CoApplyCastSkillAttachOnly(CommandDto cmd)
+        {
+            ResultAttachmentDto attach = null;
+            try { attach = ResultAttachmentCodec.FromJson(cmd.resultAttachmentJson); }
+            catch (Exception ex)
+            {
+                _log.LogWarning("[Sync] CastSkill attach parse: " + ex.Message);
+            }
+
+            if (!ResultAttachmentCodec.HasPayload(attach))
+            {
+                _log.LogWarning("[Sync] CastSkill without attachment — skip");
+                yield break;
+            }
+
+            var idsBefore = ActionPresentation.SnapshotAliveIds();
+            ActionPresentation.KickSkillCastCue(_log);
+
+            try { ResultAttachmentBridge.PreSpawnMissing(attach, _log); }
+            catch (Exception ex)
+            {
+                _log.LogWarning("[Sync] CastSkill PreSpawn: " + ex.Message);
+            }
+
+            var doomed = ActionPresentation.CollectMissingUnits(idsBefore, attach);
+            var deferOrphans = doomed != null && doomed.Count > 0;
+
+            ApplyResultAttachment(attach, "CastSkill", snapPositions: true,
+                removeMissingUnits: !deferOrphans);
+
+            if (deferOrphans)
+            {
+                foreach (var victim in doomed)
+                {
+                    if (victim == null || victim.dead)
+                        continue;
+                    ActionPresentation.KickUnitDeathVisual(victim, null, victim.hp_cur, _log);
+                }
+
+                yield return CombatPresentationRules.DeathVisualLeadSeconds;
+
+                var hostIds = new HashSet<int>();
+                if (attach.units != null)
+                {
+                    foreach (var us in attach.units)
+                    {
+                        if (us != null)
+                            hostIds.Add(us.unitId);
+                    }
+                }
+
+                using (SyncContext.BeginRemoteApply())
+                    ResultAttachmentBridge.RemoveUnitsMissingFromHost(hostIds, GS_Battle.self, _log);
+            }
+
+            ActionPresentation.AfterAttachApply(attach, _log, cmd, idsBefore);
+            RemoteTurnPresentation.RefreshLocalVision(_log);
+            ResultAttachmentBridge.RefreshUnactionedLists(_log);
+            _log.LogInfo(
+                $"[Sync] Applied CastSkill(attach-only) deaths={doomed?.Count ?? 0} units={attach.units?.Length ?? 0}");
         }
 
         private static void EnsureUnitActed(UnitData unit)

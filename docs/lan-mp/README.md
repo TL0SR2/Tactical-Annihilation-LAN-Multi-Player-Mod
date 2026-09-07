@@ -2,7 +2,7 @@
 
 > **状态：DRAFT r2（设计基线已收敛；模块待人工 APPROVED）**  
 > 原则：**先打草案 → 人工审核 → 再写代码**。  
-> 设计基线：[ADR-001](./adr/ADR-001-host-authority.md) · [ADR-002](./adr/ADR-002-injection-host.md) · [ADR-003](./adr/ADR-003-determinism-rng.md)
+> 设计基线：[ADR-001](./adr/ADR-001-host-authority.md) · [ADR-002](./adr/ADR-002-injection-host.md) · [ADR-003](./adr/ADR-003-determinism-rng.md) · [ADR-004](./adr/ADR-004-turn-authority.md) · [ADR-005](./adr/ADR-005-co-skills.md)（DRAFT）
 
 本目录存放联机插件规格，**不是**游戏本体文档。目标：*Tactical Annihilation*（Unity Mono / `Assembly-CSharp.dll`）。
 

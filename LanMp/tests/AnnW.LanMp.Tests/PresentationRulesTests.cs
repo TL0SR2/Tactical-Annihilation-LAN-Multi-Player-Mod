@@ -109,6 +109,8 @@ namespace AnnW.LanMp.Tests
 
         [Theory]
         [InlineData("EndTurn", false, false, true, AttachmentApplyPolicy.ResourceApplyMode.AllPlayers)]
+        [InlineData("CastSkill", true, false, true, AttachmentApplyPolicy.ResourceApplyMode.AllPlayers)]
+        [InlineData("CastSkill", true, true, true, AttachmentApplyPolicy.ResourceApplyMode.AllPlayers)]
         [InlineData("DoAction", true, true, true, AttachmentApplyPolicy.ResourceApplyMode.LocalSeatOnly)]
         [InlineData("UnitMoved", true, true, true, AttachmentApplyPolicy.ResourceApplyMode.LocalSeatOnly)]
         [InlineData("Undo", true, true, true, AttachmentApplyPolicy.ResourceApplyMode.LocalSeatOnly)]

@@ -8,6 +8,7 @@
 | ADR-002 | [ADR-002-injection-host.md](./ADR-002-injection-host.md) | ACCEPTED |
 | ADR-003 | [ADR-003-determinism-rng.md](./ADR-003-determinism-rng.md) | ACCEPTED |
 | ADR-004 | [ADR-004-turn-authority.md](./ADR-004-turn-authority.md) | ACCEPTED |
+| ADR-005 | [ADR-005-co-skills.md](./ADR-005-co-skills.md) | **ACCEPTED**（开工授权） |
 | — | [TEMPLATE.md](./TEMPLATE.md) | 模板 |
 
 推翻任一条须新 ADR 并回写模块。

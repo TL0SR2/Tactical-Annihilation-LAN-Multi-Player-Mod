@@ -32,6 +32,10 @@
 
 **验收：** 仅己方回合可开技能；施放后两端单位/资源一致；Guest 不能本地偷放技能。
 
+## 已知缺口（2026-09-07）→ 已实现（0.19.0）
+
+开局 loadout + 能量/EffectHost 附件已按 [ADR-005](./adr/ADR-005-co-skills.md) / [M07](./modules/M07-co-skills.md) 落地。请手测：被动可见、充能同步、Host/Guest/AI 施放。
+
 ## 仍须手测留意
 
 - 技能若生成**全新 unit_id**，附件目前主要校正已有单位 HP/位/资源；极端技能若大量创生单位，可能需加强 CreateUnit 同步（已挡 Guest 本地 CreateUnit）。

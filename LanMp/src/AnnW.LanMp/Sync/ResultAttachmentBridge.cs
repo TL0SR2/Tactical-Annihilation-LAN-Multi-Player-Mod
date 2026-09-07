@@ -52,6 +52,25 @@ namespace AnnW.LanMp.Sync
                     };
                     try
                     {
+                        if (p.co_data != null)
+                        {
+                            ps.coEnergy = p.co_data.energy;
+                            ps.skillUsedTimes = p.co_data.skill_used_times;
+                        }
+                    }
+                    catch { /* omit */ }
+                    try
+                    {
+                        if (p.effect_host != null)
+                        {
+                            var ob = p.effect_host.SaveOb();
+                            if (ob != null)
+                                ps.effectObJson = ob.ToString();
+                        }
+                    }
+                    catch { /* omit */ }
+                    try
+                    {
                         if (p.teleport_logic != null)
                         {
                             try { p.teleport_logic.UpdateAmount(); }
@@ -220,6 +239,17 @@ namespace AnnW.LanMp.Sync
             }
             catch { /* ignore */ }
 
+            try
+            {
+                if (u.effect_host != null)
+                {
+                    var ob = u.effect_host.SaveOb();
+                    if (ob != null)
+                        snap.effectObJson = ob.ToString();
+                }
+            }
+            catch { /* ignore */ }
+
             return snap;
         }
 
@@ -279,6 +309,21 @@ namespace AnnW.LanMp.Sync
                             AnnW.LanMp.Presentation.RemoteTurnPresentation.RefreshEcoBar(player);
                         }
                         catch { /* ignore */ }
+                    }
+                }
+
+                // ADR-005: CO energy / player EffectHost — apply for all seats (not LocalSeatOnly-filtered).
+                if (dto.players != null)
+                {
+                    foreach (var ps in dto.players)
+                    {
+                        if (ps == null)
+                            continue;
+                        var player = FindPlayer(ps.index);
+                        if (player == null)
+                            continue;
+                        ApplyCoEnergyState(player, ps, log);
+                        ApplyEffectHostJson(player?.effect_host, ps.effectObJson, "player", player.index, log);
                     }
                 }
 
@@ -355,6 +400,7 @@ namespace AnnW.LanMp.Sync
 
                         ApplyShieldState(unit, us, log);
                         ApplyRankExpState(unit, us, log);
+                        ApplyEffectHostJson(unit.effect_host, us.effectObJson, "unit", us.unitId, log);
 
                         try { unit.Event_UpdatePos?.Invoke(); }
                         catch { /* ignore */ }
@@ -836,6 +882,67 @@ namespace AnnW.LanMp.Sync
         }
 
         private static long PackPos(int x, int y) => ((long)x << 32) ^ (uint)y;
+
+        /// <summary>ADR-005: stamp CO_Data.energy / skill_used_times (no AddEnergy re-sim).</summary>
+        private static void ApplyCoEnergyState(Player player, PlayerSnapDto ps, ManualLogSource log)
+        {
+            if (player?.co_data == null || ps == null)
+                return;
+            try
+            {
+                var co = player.co_data;
+                var dirty = false;
+                if (ps.coEnergy >= 0f && Math.Abs(co.energy - ps.coEnergy) > 0.001f)
+                {
+                    co.energy = ps.coEnergy;
+                    dirty = true;
+                    log?.LogInfo(
+                        $"[Attach] player[{ps.index}] coEnergy → {ps.coEnergy:0.###}");
+                }
+                if (ps.skillUsedTimes >= 0 && co.skill_used_times != ps.skillUsedTimes)
+                {
+                    co.skill_used_times = ps.skillUsedTimes;
+                    dirty = true;
+                }
+                // Guest never runs AfterSkillCast — must mirror energy_max from used count
+                // or IsEnergyMax / UI percent use a stale denominator (audit High).
+                if (dirty || ps.skillUsedTimes >= 0 || ps.coEnergy >= 0f)
+                {
+                    var max = CoEnergyRules.ComputeEnergyMax(co.skill_used_times);
+                    if (Math.Abs(co.energy_max - max) > 0.001f)
+                        co.energy_max = max;
+                }
+            }
+            catch (Exception ex)
+            {
+                log?.LogWarning("[Attach] coEnergy player=" + ps.index + ": " + ex.Message);
+            }
+        }
+
+        /// <summary>ADR-005: EffectHost LoadOb from Host DynOb string (CastSkill / PS buffs).</summary>
+        private static void ApplyEffectHostJson(
+            EffectHost host,
+            string json,
+            string tag,
+            int id,
+            ManualLogSource log)
+        {
+            if (host == null || string.IsNullOrEmpty(json))
+                return;
+            try
+            {
+                var ob = DynOb.Parse(json) as DynOb;
+                if (ob == null)
+                    return;
+                try { host.RemoveAll(); }
+                catch { /* ignore */ }
+                host.LoadOb(ob);
+            }
+            catch (Exception ex)
+            {
+                log?.LogWarning("[Attach] effect_host " + tag + "=" + id + ": " + ex.Message);
+            }
+        }
 
         /// <summary>
         /// Remove local alive units absent from Host attachment id set (orphans / deferred combat kills).

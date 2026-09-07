@@ -113,6 +113,7 @@ namespace AnnW.LanMp
             Authority = new AuthorityService(Lobby, Net, Log);
             Lobby.IsBattleStartedGate = () => Lobby.StartAuthorized || Authority.InLanBattle;
             Lobby.CoPoolProvider = ListCoPool;
+            Lobby.AfterBakeCoLoadout = draft => CoLoadoutResolver.StampDraft(draft, Log);
             TurnAuth = new TurnAuthority(Net, Authority, Log);
             Sync = new CommandSyncService(Net, Authority, AttachResultsOnCommands, Log);
             Sync.TurnAuth = TurnAuth;

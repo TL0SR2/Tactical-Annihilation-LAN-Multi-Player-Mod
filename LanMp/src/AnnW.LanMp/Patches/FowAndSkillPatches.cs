@@ -158,12 +158,41 @@ namespace AnnW.LanMp.Patches
         [HarmonyPatch(typeof(UI_SkillBtn), nameof(UI_SkillBtn.OnClick))]
         private static class Patch_UI_SkillBtn_OnClick
         {
-            private static bool Prefix()
+            private static bool Prefix(UI_SkillBtn __instance)
             {
                 if (!GateUtil.ShouldBlockUx(out var reason))
+                {
+                    // Empty skill_action NRE guard (loadout miss / no-CO seats).
+                    try
+                    {
+                        var co = GS_Battle.self?.cur_player?.co_data;
+                        if (co?.skill_action == null)
+                        {
+                            GateUtil.Toast("当前指挥官无可用技能");
+                            return false;
+                        }
+                    }
+                    catch { /* allow vanilla */ }
                     return true;
+                }
                 GateUtil.Toast(reason);
                 return false;
+            }
+        }
+
+        [HarmonyPatch(typeof(UI_SkillBtn), nameof(UI_SkillBtn.Render))]
+        private static class Patch_UI_SkillBtn_Render
+        {
+            private static bool Prefix()
+            {
+                try
+                {
+                    var co = GS_Battle.self?.cur_player?.co_data;
+                    if (co != null && co.skill_action == null)
+                        return false; // skip vanilla Render that assumes skill_action
+                }
+                catch { /* fall through */ }
+                return true;
             }
         }
 

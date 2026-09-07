@@ -77,6 +77,8 @@ namespace AnnW.LanMp.Patches
             }
             else if (kind == Kind.EndTurn || kind == Kind.Undo || kind == Kind.CastSkill)
             {
+                // CastSkill: FowAndSkillPatches owns Intent emit; this branch only spectate-blocks
+                // if some caller still routes CastSkill through AllowLocalMutation.
                 var battle = GS_Battle.self;
                 if (battle?.cur_player != null &&
                     plugin.Authority.ShouldBlockLocalInput(battle.cur_player.index))

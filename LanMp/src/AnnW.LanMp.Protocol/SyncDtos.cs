@@ -168,6 +168,9 @@ namespace AnnW.LanMp.Protocol
 
         /// <summary>TransportLogic.max_bp_base (load capacity base). -1 = omit.</summary>
         public int transportMaxBpBase = -1;
+
+        /// <summary>UnitData.effect_host DynOb.ToString(). Null = omit (ADR-005 CastSkill buffs).</summary>
+        public string effectObJson;
     }
 
     public class PlayerSnapDto
@@ -189,6 +192,12 @@ namespace AnnW.LanMp.Protocol
         public int teleportLoadedBp = -1;
         /// <summary>Player.teleport_logic.max_bp_base. -1 = omit.</summary>
         public int teleportMaxBpBase = -1;
+        /// <summary>CO_Data.energy. Negative = legacy omit.</summary>
+        public float coEnergy = -1f;
+        /// <summary>CO_Data.skill_used_times. Negative = omit.</summary>
+        public int skillUsedTimes = -1;
+        /// <summary>Player.effect_host DynOb.ToString(). Null = omit.</summary>
+        public string effectObJson;
     }
 
     /// <summary>Tile wreck metal puddle (Host Die → CreateWreck; Guest must not re-roll Random).</summary>

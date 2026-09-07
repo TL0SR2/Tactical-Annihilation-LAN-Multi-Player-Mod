@@ -175,11 +175,17 @@ namespace AnnW.LanMp
             return null;
         }
 
-        /// <summary>UI: prefer live game tables so option lists track game updates.</summary>
+        /// <summary>Vanilla eco table only (CompatProbe parity). Prefer <see cref="LanResMulOptionsLive"/> in LAN UI.</summary>
         internal static float[] ResMulOptionsLive()
         {
             var live = TryReadFloatArray("SkirmishResMulOptions");
             return live != null && live.Length > 0 ? live : SkirmishSeatEconomy.ResMulOptions;
+        }
+
+        /// <summary>LAN lobby Eco: live vanilla ladder + plugin extras up to ×100.</summary>
+        internal static float[] LanResMulOptionsLive()
+        {
+            return SkirmishSeatEconomy.BuildLanResMulOptions(ResMulOptionsLive());
         }
 
         internal static float[] AiIntelOptionsLive()

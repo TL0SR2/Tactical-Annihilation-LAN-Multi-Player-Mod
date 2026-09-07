@@ -136,6 +136,16 @@ namespace AnnW.LanMp.Presentation
             }
         }
 
+        /// <summary>Light CastSkill cue on Guest (ADR-003 R4) — no proc_CastSkill.</summary>
+        internal static void KickSkillCastCue(ManualLogSource log = null)
+        {
+            try { BattleEventBus.self.TriggerSkillCastStarted(); }
+            catch (Exception ex)
+            {
+                log?.LogWarning("[Presentation] SkillCastStarted: " + ex.Message);
+            }
+        }
+
         /// <summary>
         /// Fire weapon/mesh action presentation without DoActionCell (no RNG / spawn).
         /// Returns seconds the caller should yield on AnnW CoroutineObject (float wait).
