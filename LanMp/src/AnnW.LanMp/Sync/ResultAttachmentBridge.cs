@@ -256,9 +256,13 @@ namespace AnnW.LanMp.Sync
         /// <param name="removeMissingUnits">
         /// When false, skip orphan RemoveUnit so caller can play death VFX first (Guest attach-only combat).
         /// </param>
+        /// <param name="applyWrecks">
+        /// When false, skip wreck puddle stamp (caller applies after Dispose so debris/puddle
+        /// appear on cleared tiles — Guest never Die→CreateWreck).
+        /// </param>
         public static void Apply(ResultAttachmentDto dto, ManualLogSource log, bool snapPositions = true,
             bool applyPlayerResources = true, int? playerResourceSeatFilter = null,
-            bool removeMissingUnits = true)
+            bool removeMissingUnits = true, bool applyWrecks = true)
         {
             if (!ResultAttachmentCodec.HasPayload(dto))
                 return;
@@ -431,7 +435,9 @@ namespace AnnW.LanMp.Sync
                     battle.current_co_index = dto.coIndex;
 
                 // After unit remove: stamp Host wreck amounts (Guest RemoveUnit never Die→CreateWreck).
-                ApplyWrecks(dto.wrecks, battle, log);
+                // Deferred-death callers pass applyWrecks:false and stamp after Dispose.
+                if (applyWrecks)
+                    ApplyWrecks(dto.wrecks, battle, log);
 
                 // Transport / teleporter cargo must be applied after units exist (ADR-003).
                 ApplyTransportState(dto, log);
@@ -919,7 +925,12 @@ namespace AnnW.LanMp.Sync
             }
         }
 
-        /// <summary>ADR-005: EffectHost LoadOb from Host DynOb string (CastSkill / PS buffs).</summary>
+        /// <summary>
+        /// ADR-005: EffectHost LoadOb from Host DynOb string (CastSkill / PS buffs / LifeTime).
+        /// Must NOT call <c>RemoveAll()</c> — that fires <c>OnEffectEnd</c>, and
+        /// <c>UnitEffect_LifeTime.OnEffectEnd</c> always <c>Die(LIFE_TIME)</c>, which would
+        /// false-kill still-alive skill summons on every Guest attach re-bind.
+        /// </summary>
         private static void ApplyEffectHostJson(
             EffectHost host,
             string json,
@@ -934,13 +945,40 @@ namespace AnnW.LanMp.Sync
                 var ob = DynOb.Parse(json) as DynOb;
                 if (ob == null)
                     return;
-                try { host.RemoveAll(); }
-                catch { /* ignore */ }
+                ClearEffectHostSilent(host);
                 host.LoadOb(ob);
             }
             catch (Exception ex)
             {
                 log?.LogWarning("[Attach] effect_host " + tag + "=" + id + ": " + ex.Message);
+            }
+        }
+
+        /// <summary>
+        /// Drop effects without <c>OnEffectEnd</c> (Host attachment is truth; Guest must not
+        /// re-simulate LifeTime / MindControl end side-effects).
+        /// </summary>
+        internal static void ClearEffectHostSilent(EffectHost host)
+        {
+            if (host == null)
+                return;
+            try
+            {
+                if (host.effects != null)
+                {
+                    for (var i = 0; i < host.effects.Count; i++)
+                    {
+                        var e = host.effects[i];
+                        if (e != null)
+                            e.host = null;
+                    }
+                    host.effects.Clear();
+                }
+                host.dic_effects?.Clear();
+            }
+            catch
+            {
+                /* leave host as-is; LoadOb may still partially apply */
             }
         }
 

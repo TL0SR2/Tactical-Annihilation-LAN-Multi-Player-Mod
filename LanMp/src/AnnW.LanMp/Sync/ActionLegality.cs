@@ -8,36 +8,19 @@ using HarmonyLib;
 namespace AnnW.LanMp.Sync
 {
     /// <summary>
-    /// Host-authoritative legality for Guest DoAction / UnitMoved Intents.
-    ///
-    /// Invariant: anything UX holds only in globals / ActionData fields that Host Validate
-    /// would not see must travel in Intent.extrasJson and be rebound via
-    /// <see cref="PrepareActionUxContext"/> before CanDoAction / ExecuteAction.
-    ///
-    /// UX-context matrix (CanDoAction / DoActionCell):
-    /// | Cate            | Extra dep                         | Fix |
-    /// | BUILD / TRAIN   | ActionData.train_template         | extras = SD unit name |
-    /// | UNLOAD_SINGLE   | GS_Battle.ux_unload_unit          | extras = u:{unitId} |
-    /// | UNLOAD (auto)   | board transport list + tile       | none |
-    /// | ATTACK          | tile.GetUnit / CanHurtTarget      | board; FOW soft-allow |
-    /// | REPAIR/HELP/…   | base CanDoAction                  | FOW soft-allow |
-    /// | SHIELD_GEN      | board shield fill state           | none |
-    /// | UnitMoved       | GetMoveZone                       | UX args / Host no FOW cull |
+    /// Host Accept legality — sole board-geometry chokepoint for Guest DoAction / UnitMoved.
+    /// See <see cref="IntentAcceptLegalityRules"/> for the FOW/geometry contract (INV-T / ADR-001).
+    /// Do not call from <c>GuestMutationGate</c>.
     /// </summary>
     internal static class ActionLegality
     {
         private static readonly MethodInfo GetMoveZoneMi = AccessTools.Method(
             typeof(UnitData), "GetMoveZone", new[] { typeof(bool), typeof(bool), typeof(bool) });
 
-        public static bool TryValidateDoAction(
-            UnitData unit,
-            int actionCate,
-            bool hasTarget,
-            int targetX,
-            int targetY,
-            out string error) =>
-            TryValidateDoAction(unit, actionCate, hasTarget, targetX, targetY, null, out error);
-
+        /// <summary>
+        /// Host Accept DoAction: extras bind → hard select-zone → soft FOW visibility →
+        /// hard other CanDoAction → hard CanAfford.
+        /// </summary>
         public static bool TryValidateDoAction(
             UnitData unit,
             int actionCate,
@@ -76,6 +59,7 @@ namespace AnnW.LanMp.Sync
                     return false;
                 }
 
+                // Hard: GetSelectZone has no FOW — this is the over-range attack gate.
                 if (!action.IsPosInSelectZone(unit.pos, tile, unit))
                 {
                     error = "out-of-range";
@@ -86,10 +70,11 @@ namespace AnnW.LanMp.Sync
             var reason = action.CanDoAction(tile, null);
             if (reason != REASON_CANTDO.OK)
             {
-                // FOW is INV-VIEW; Host board is Intent truth.
-                if (reason == REASON_CANTDO.TARGET_NOT_VISIBLE)
+                if (IntentAcceptLegalityRules.IsSoftAcceptCantDoReason((int)reason))
                 {
-                    /* allow */
+                    LanMpPlugin.Log?.LogWarning(
+                        "[ActionLegality] Host soft-accept TARGET_NOT_VISIBLE unit=" +
+                        unit.unit_id + " cate=" + cate);
                 }
                 else
                 {
@@ -107,10 +92,6 @@ namespace AnnW.LanMp.Sync
             return true;
         }
 
-        /// <summary>
-        /// Rebind UX-only fields from Intent extras before Validate or ExecuteAction.
-        /// Safe to call repeatedly; no-ops when extras empty / cate needs nothing.
-        /// </summary>
         public static void PrepareActionUxContext(UnitData unit, ActionCate cate, string extrasJson)
         {
             if (unit == null)
@@ -130,12 +111,11 @@ namespace AnnW.LanMp.Sync
                 }
                 catch
                 {
-                    /* leave unset — CanDoAction will reject */
+                    /* leave unset */
                 }
             }
         }
 
-        /// <summary>Guest emit: snapshot UX globals / action fields into extrasJson.</summary>
         public static string CaptureExtrasForIntent(ActionCate cate, ActionData action)
         {
             try
@@ -181,14 +161,14 @@ namespace AnnW.LanMp.Sync
             }
         }
 
-        public static bool TryValidateUnitMoved(UnitData unit, int targetX, int targetY, out string error) =>
-            TryValidateUnitMoved(unit, targetX, targetY, forHostAccept: false, out error);
-
+        /// <summary>
+        /// Host Accept UnitMoved: GetMoveZone per <see cref="IntentAcceptLegalityRules"/>
+        /// (no FOW cull). Zone miss is hard — soft-accept would re-open over-range Apply.
+        /// </summary>
         public static bool TryValidateUnitMoved(
             UnitData unit,
             int targetX,
             int targetY,
-            bool forHostAccept,
             out string error)
         {
             error = null;
@@ -205,32 +185,53 @@ namespace AnnW.LanMp.Sync
                 return false;
             }
 
-            IList zone;
+            // Stale UX temp blacklist on Host can shrink zones (same-faction / shared Player).
+            try { unit.player?.temp_move_black?.Clear(); }
+            catch { /* ignore */ }
+
+            // PreferUnitOwnerFow: AcquireFOWMap still runs before cull_fow branch; keep owner
+            // FOW if anything else reads the map. cull_fow:false skips CanWalk (authority geom).
+            var prevFow = SyncContext.PreferUnitOwnerFowForMoveZone;
+            SyncContext.PreferUnitOwnerFowForMoveZone = true;
             try
             {
-                // UX PrepareMoveOp: (false, true, true). Host Accept: no FOW cull.
-                var cullFow = !forHostAccept;
-                zone = GetMoveZoneMi.Invoke(unit, new object[] { false, true, cullFow }) as IList;
+                var zone = GetMoveZoneMi.Invoke(unit, new object[]
+                {
+                    IntentAcceptLegalityRules.HostMoveCullFriendly,
+                    IntentAcceptLegalityRules.HostMoveNoCullTransport,
+                    IntentAcceptLegalityRules.HostMoveCullFow
+                }) as IList;
+                if (zone == null)
+                {
+                    error = "no-move-zone";
+                    return false;
+                }
+
+                if (ZoneContains(zone, dest))
+                    return true;
+
+                error = "out-of-move-range";
+                return false;
             }
             catch
             {
                 error = "no-move-zone";
                 return false;
             }
-
-            if (zone == null)
+            finally
             {
-                error = "no-move-zone";
-                return false;
+                SyncContext.PreferUnitOwnerFowForMoveZone = prevFow;
             }
+        }
 
+        private static bool ZoneContains(IList zone, Inctor2 dest)
+        {
             for (var i = 0; i < zone.Count; i++)
             {
-                if (zone[i] is Inctor2 p && p.Equals(dest))
+                var item = zone[i];
+                if (item is Inctor2 p && p.x == dest.x && p.y == dest.y)
                     return true;
             }
-
-            error = "out-of-move-range";
             return false;
         }
 

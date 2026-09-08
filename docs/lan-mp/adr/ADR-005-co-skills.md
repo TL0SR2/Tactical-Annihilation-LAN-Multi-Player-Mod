@@ -23,6 +23,7 @@
 4. `LobbySeatDto` **仅有** `coId`，无 skill/PS 字段；`BakeForStart` 只解析随机 `coId`。
 5. CastSkill：**已有** Guest Intent → Host 施放 → `OnSkillCastDone` → Command + `CaptureBoard`；Guest Apply **attach-only**（`FowAndSkillPatches` / `CommandSyncService`）。`FOW-SKILL-AUDIT.md` 描述的施法环已接线，但被开局空 loadout **架空**。
 6. 能量：`UnitData.ReduceHP` → `CO_Data.AddEnergy`。Guest DoAction attach-only **不**走 `ReduceHP`。`PlayerSnapDto` **无** `energy` / EffectHost 字段。
+7. **Zero / 自由栏：** 表默认 `skill+pss` 不含 Zero 与第三被动；须从 `UI_CO_SelectResult` 写入 `skillId/psIds`，或 Host `GS_CO.GetActual*` / 解锁池随机戳 DTO。Stamp **不得**覆盖已著作者选技。遭遇战 `PartPS.IsAvailable` 的 `Max(1,level)` 会锁死自由栏（index==2）——LAN 下补丁为 skirmish 解锁三槽。
 
 用户可见症状：Host/Guest 均无被动加成、技能按钮实质不可用（`skill_action == null`）。
 
@@ -69,7 +70,9 @@
    - Host 在 `BakeForStart`（或 LobbyStart 前单点）为每个存在座位写入权威 `skillId` / `psIds`（可先用默认表：`SD_ANNW_CO.skill` + `pss`/`ps1`/`ps2`，或 `SetAsDefaultSkillAndPS` 的等价解析结果戳回 DTO）。  
    - **禁止** Guest 用 `GS_CO.GetActual*` 自行决定 loadout。  
    - `BattleBootstrap` **删除**空 `skill`/`ps_list` 硬编码，改为消费座位字段。  
-   - MVP 可落地「默认技」捷径：Host Bake 时若未选手动 skill，则解析默认并写入 DTO（仍走 B，而非两端静默 A）。
+   - MVP 可落地「默认技」捷径：Host Bake 时若未选手动 skill，则解析默认并写入 DTO（仍走 B，而非两端静默 A）。  
+   - **房间选将：** `UI_CO_SelectResult.skill` / `list_ps` 经 `SeatEditRequest.setLoadout` 写入座位；`CoLoadoutResolver.StampSeat` 若已有著作者 loadout 则跳过，避免盖掉 Zero/自由栏。空座位再走表 → `GetActual*` → 解锁池随机。  
+   - **遭遇战自由栏 UI：** Harmony 修正 `PartPS.IsAvailable`（skirmish 解锁 index&lt;3）并抬升技/被动选择弹层。
 
 2. **能量（Phase 1）**  
    - 扩展 `PlayerSnapDto`：`coEnergy`（及必要的 `skillUsedTimes` / 展示用 percent）；`CaptureBoard`/`Apply` 读写 `CO_Data`。  

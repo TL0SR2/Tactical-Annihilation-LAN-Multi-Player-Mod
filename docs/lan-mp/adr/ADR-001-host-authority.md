@@ -51,7 +51,8 @@ Host 持有权威 `GS_Battle`；Client 提交 **Intent**；Host **校验并 Appl
 1. AI **仅 Host** 决策，并变为可广播的 Command（或 Host-only Apply + 对 Client 的等价 Command）。  
 2. 判胜 / `EndGame` **仅 Host** 触发并广播 `MatchEnd`。  
 3. Client 本地 UX 可做预测，但 **以 Host 回执为准**；无回执不得推进回合。  
-4. 拒绝「无 Host 的纯锁步」作为 v1 目标。
+4. 拒绝「无 Host 的纯锁步」作为 v1 目标。  
+5. **Accept 合法性单一 chokepoint（INV-ACCEPT）：** 原版 `ExecuteAction` 不再复检射程；Guest 棋盘偏差可导致超射程 Apply。Host Accept **必须**用权威棋盘做几何校验（移动：`GetMoveZone(false,true,false)` 跳过 FOW CanWalk；行动：`IsPosInSelectZone` 无 FOW）。`TARGET_NOT_VISIBLE` 可软接受。Guest **禁止**用 `GetMoveZone`/`CanDoAction` fail-fast（第二扇门 + INV-VIEW FOW 假拒，见 0.18.2 回归）。归属/spent 仍可在 Guest 拦。策略码：`IntentAcceptLegalityRules`。
 
 ## 后果
 

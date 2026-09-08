@@ -20,9 +20,25 @@ namespace AnnW.LanMp.Protocol
         }
 
         /// <summary>
-        /// Seconds to yield after KickUnitDeathVisual so CoroutineObject death VFX can start
-        /// before RemoveUnit/Dispose (Host Die starts anim then DescendUnit; Guest must not Dispose instantly).
+        /// size==1: Event_DieExplode runs on first coroutine frame (before first yield).
+        /// Keep a short lead so DescendUnit can start before Guest Dispose.
         /// </summary>
-        public const float DeathVisualLeadSeconds = 0.4f;
+        public const float DeathVisualLeadSecondsSmall = 0.35f;
+
+        /// <summary>
+        /// size&gt;1 COMBAT death: vanilla yields 3×0.3s + 0.1s before Event_DieExplode
+        /// (debris / building break-apart). Guest must not RemoveUnit before that.
+        /// </summary>
+        public const float DeathVisualLeadSecondsLarge = 1.25f;
+
+        /// <summary>Legacy alias — small-unit lead (tests / callers without chassis size).</summary>
+        public const float DeathVisualLeadSeconds = DeathVisualLeadSecondsSmall;
+
+        /// <summary>
+        /// Seconds to yield after KickUnitDeathVisual before RemoveUnit/Dispose.
+        /// Matches vanilla proc_UnitDeathAnimation timing by chassis footprint.
+        /// </summary>
+        public static float DeathVisualLeadSecondsForChassisSize(int chassisSize) =>
+            chassisSize > 1 ? DeathVisualLeadSecondsLarge : DeathVisualLeadSecondsSmall;
     }
 }

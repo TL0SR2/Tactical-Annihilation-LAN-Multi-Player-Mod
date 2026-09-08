@@ -35,6 +35,12 @@ namespace AnnW.LanMp.Ui
         public const float MapTitleFont = 42f;
         public const float MapDesFont = 32f;
 
+        // Eco log slider (seat row): knob ~ ArrowH weight, not full SeatDropH.
+        // Track uses vertical frac so bar sits in the middle of the dropdown-tall cell.
+        public const float EcoSliderHandleW = 22f;
+        public const float EcoSliderHandleH = 24f;
+        public const float EcoSliderTrackYFrac = 0.34f;
+
         /// <summary>No-op: metrics are baked. Kept so call sites stay stable.</summary>
         public static void EnsureSampled() { }
     }

@@ -100,7 +100,7 @@ namespace AnnW.LanMp.Ui
             sliderLe.minHeight = h - 6f;
             sliderLe.preferredHeight = h - 6f;
 
-            var slider = BuildLogSlider(sliderHost, h - 6f);
+            var slider = BuildLogSlider(sliderHost);
             slider.minValue = 0f;
             slider.maxValue = 1f;
             slider.wholeNumbers = false;
@@ -143,31 +143,48 @@ namespace AnnW.LanMp.Ui
             trigger.triggers.Add(entry);
         }
 
-        private static Slider BuildLogSlider(RectTransform host, float height)
+        /// <summary>
+        /// Unity Slider chrome sized to seat-row metrics. Handle is a fixed-size child
+        /// (not the stretched Handle Slide Area) — the old sizeDelta(12, cellH) on a
+        /// full-stretch slide area produced a full-row-tall needle.
+        /// </summary>
+        private static Slider BuildLogSlider(RectTransform host)
         {
-            var bg = AnnwUiKit.CreateImage(
-                host, AnnwUiKit.WhiteSprite ?? AnnwUiKit.PanelSprite,
+            var handleW = SkirmishUiMetrics.EcoSliderHandleW;
+            var handleH = SkirmishUiMetrics.EcoSliderHandleH;
+            var yFrac = SkirmishUiMetrics.EcoSliderTrackYFrac;
+            var padX = handleW * 0.5f;
+
+            var bgRt = AnnwUiKit.CreateRect("Background", host);
+            Stretch(bgRt, 0f, yFrac);
+            AnnwUiKit.CreateImage(
+                bgRt, AnnwUiKit.WhiteSprite ?? AnnwUiKit.PanelSprite,
                 new Color(0.12f, 0.08f, 0.05f, 0.95f), Image.Type.Sliced);
-            Stretch(bg.rectTransform, 0f, 0.28f);
 
             var fillArea = AnnwUiKit.CreateRect("Fill Area", host);
-            Stretch(fillArea, 5f, 0.28f);
+            Stretch(fillArea, padX, yFrac);
+            var fillRt = AnnwUiKit.CreateRect("Fill", fillArea);
+            StretchFull(fillRt);
             var fill = AnnwUiKit.CreateImage(
-                fillArea, AnnwUiKit.WhiteSprite ?? AnnwUiKit.PanelSprite,
+                fillRt, AnnwUiKit.WhiteSprite ?? AnnwUiKit.PanelSprite,
                 new Color(0.75f, 0.55f, 0.2f, 0.95f), Image.Type.Sliced);
-            StretchFull(fill.rectTransform);
 
             var handleArea = AnnwUiKit.CreateRect("Handle Slide Area", host);
-            Stretch(handleArea, 0f, 0f);
+            Stretch(handleArea, padX, yFrac);
+            var handleRt = AnnwUiKit.CreateRect("Handle", handleArea);
+            handleRt.anchorMin = new Vector2(0f, 0.5f);
+            handleRt.anchorMax = new Vector2(0f, 0.5f);
+            handleRt.pivot = new Vector2(0.5f, 0.5f);
+            handleRt.sizeDelta = new Vector2(handleW, handleH);
+            handleRt.anchoredPosition = Vector2.zero;
             var handle = AnnwUiKit.CreateImage(
-                handleArea, AnnwUiKit.WhiteSprite ?? AnnwUiKit.PanelSprite,
+                handleRt, AnnwUiKit.WhiteSprite ?? AnnwUiKit.PanelSprite,
                 new Color(0.95f, 0.85f, 0.55f, 1f), Image.Type.Sliced);
-            handle.rectTransform.sizeDelta = new Vector2(12f, height);
 
             var slider = host.gameObject.AddComponent<Slider>();
             slider.targetGraphic = handle;
             slider.fillRect = fill.rectTransform;
-            slider.handleRect = handle.rectTransform;
+            slider.handleRect = handleRt;
             slider.direction = Slider.Direction.LeftToRight;
             slider.transition = Selectable.Transition.ColorTint;
             return slider;

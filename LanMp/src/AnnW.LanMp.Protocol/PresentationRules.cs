@@ -127,5 +127,26 @@ namespace AnnW.LanMp.Protocol
                 return isHumanControl;
             return true;
         }
+
+        /// <summary>
+        /// CO skill button (UI_Part_SkillPower): vanilla hides on AI turns via cur_player.is_ai,
+        /// but LAN spectating a remote human still has is_ai=false — must hide locally.
+        /// Own turn + has skill SD → show (energy-full glow is vanilla Render / IsEnergyMax).
+        /// </summary>
+        public static bool ShouldShowCoSkillButton(
+            bool inLanBattle,
+            bool gatesArmed,
+            bool isSpectating,
+            bool curPlayerIsAi,
+            bool hasCoSkillSd)
+        {
+            if (!hasCoSkillSd)
+                return false;
+            if (curPlayerIsAi)
+                return false;
+            if (inLanBattle && gatesArmed && isSpectating)
+                return false;
+            return true;
+        }
     }
 }

@@ -556,11 +556,24 @@ namespace AnnW.LanMp.Protocol
                 if (!string.Equals(seat.coId, nextCo, StringComparison.Ordinal))
                 {
                     seat.coId = nextCo;
-                    // Stale skill/PS must not survive CO swap; Host re-stamps via AfterBake / seat hook.
-                    CoLoadoutRules.Clear(seat);
+                    // Stale skill/PS must not survive CO swap unless this request carries a new loadout.
+                    if (!req.setLoadout)
+                        CoLoadoutRules.Clear(seat);
                 }
                 else
                     seat.coId = nextCo;
+            }
+
+            if (req.setLoadout)
+            {
+                if (!(hostMayTuneAi || humanMayTune))
+                {
+                    nack = SeatEditNackCode.NotAllowed;
+                    message = "loadout";
+                    return false;
+                }
+                // Host-authored pick from UI_CO_SelectResult (ADR-005) — may be empty for Zero until defaults stamp.
+                CoLoadoutRules.Stamp(seat, req.skillId, req.psIds);
             }
 
             return true;

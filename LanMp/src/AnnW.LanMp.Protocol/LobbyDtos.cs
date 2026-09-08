@@ -146,6 +146,10 @@ namespace AnnW.LanMp.Protocol
         public int pos;
         public bool setCoId;
         public string coId = "";
+        /// <summary>When true with setCoId (or alone), apply skillId/psIds from CO select UI.</summary>
+        public bool setLoadout;
+        public string skillId = "";
+        public string[] psIds;
         public bool setResPercent;
         public float resPercent;
         public bool setAiIntelligence;

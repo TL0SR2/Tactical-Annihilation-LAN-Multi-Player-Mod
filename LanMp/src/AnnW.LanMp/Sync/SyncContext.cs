@@ -15,6 +15,13 @@ namespace AnnW.LanMp.Sync
         /// <summary>Guest CreateUnit allowed only when applying an authoritative CreateUnit command.</summary>
         public static bool AllowForcedCreate { get; set; }
 
+        /// <summary>
+        /// Host Intent Validate: GetMoveZone AcquireFOWMap uses unit-owner FOW (not INV-VIEW).
+        /// With HostMoveCullFow=false CanWalk is skipped; flag still avoids ally viewer rewrite
+        /// on the acquired map. See IntentAcceptLegalityRules.
+        /// </summary>
+        public static bool PreferUnitOwnerFowForMoveZone { get; set; }
+
         public static IDisposable BeginRemoteApply()
         {
             return new Scope(remote: true);

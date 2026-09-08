@@ -21,10 +21,24 @@ namespace AnnW.LanMp.Tests
         }
 
         [Fact]
-        public void DeathVisualLeadSeconds_is_positive()
+        public void DeathVisualLead_small_unit_under_half_second()
         {
-            Assert.True(CombatPresentationRules.DeathVisualLeadSeconds > 0.05f);
-            Assert.True(CombatPresentationRules.DeathVisualLeadSeconds < 2f);
+            Assert.Equal(
+                CombatPresentationRules.DeathVisualLeadSecondsSmall,
+                CombatPresentationRules.DeathVisualLeadSecondsForChassisSize(1));
+            Assert.True(CombatPresentationRules.DeathVisualLeadSecondsSmall > 0.05f);
+            Assert.True(CombatPresentationRules.DeathVisualLeadSecondsSmall < 0.5f);
+        }
+
+        [Fact]
+        public void DeathVisualLead_large_building_covers_vanilla_explode_delay()
+        {
+            // Vanilla size>1: 3×0.3s + 0.1s before Event_DieExplode ≈ 1.0s.
+            Assert.Equal(
+                CombatPresentationRules.DeathVisualLeadSecondsLarge,
+                CombatPresentationRules.DeathVisualLeadSecondsForChassisSize(2));
+            Assert.True(CombatPresentationRules.DeathVisualLeadSecondsLarge >= 1.0f);
+            Assert.True(CombatPresentationRules.DeathVisualLeadSecondsLarge < 2.5f);
         }
     }
 }

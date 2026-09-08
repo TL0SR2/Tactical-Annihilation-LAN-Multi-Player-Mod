@@ -330,5 +330,18 @@ namespace AnnW.LanMp.Tests
             Assert.Equal(expected, PresentationRules.ShouldRenderHoverThreatOverlay(
                 inLan, armed, script, autoGuide, human));
         }
+
+        [Theory]
+        [InlineData(false, true, false, false, true, true)]   // solo / not LAN
+        [InlineData(true, true, true, false, true, false)]  // LAN spectate remote human
+        [InlineData(true, true, false, true, true, false)]  // AI turn
+        [InlineData(true, true, false, false, false, false)] // no skill SD
+        [InlineData(true, true, false, false, true, true)]  // own human turn + skill
+        public void ShouldShowCoSkillButton_cases(
+            bool inLan, bool armed, bool spectate, bool curAi, bool hasSkill, bool expected)
+        {
+            Assert.Equal(expected, PresentationRules.ShouldShowCoSkillButton(
+                inLan, armed, spectate, curAi, hasSkill));
+        }
     }
 }

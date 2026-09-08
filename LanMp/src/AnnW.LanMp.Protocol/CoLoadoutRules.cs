@@ -37,5 +37,12 @@ namespace AnnW.LanMp.Protocol
             return string.IsNullOrEmpty(seat.skillId) &&
                    (seat.psIds == null || seat.psIds.Length == 0);
         }
+
+        /// <summary>
+        /// User or Host already authored a loadout (CO select UI / prior stamp).
+        /// AfterBake must not overwrite with table defaults (would drop Zero / free-slot picks).
+        /// </summary>
+        public static bool HasAuthoredLoadout(LobbySeatDto seat) =>
+            HasSkillId(seat) || HasAnyPs(seat);
     }
 }

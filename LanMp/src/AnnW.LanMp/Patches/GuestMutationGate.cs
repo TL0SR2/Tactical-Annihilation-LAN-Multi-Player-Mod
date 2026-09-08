@@ -6,8 +6,10 @@ using UnityEngine;
 namespace AnnW.LanMp.Patches
 {
     /// <summary>
-    /// ADR-001 single-center lock: Guest never mutates battle state locally in play phase.
+    /// ADR-001 / INV-ACCEPT: Guest never mutates battle state locally in play phase.
     /// All Guest UX/AI/EQ/AutoCmd attempts become Intent → Host Validate+Apply → Command.
+    /// Board geometry/FOW legality is Host-only (<c>ActionLegality</c>); this gate may only
+    /// block ownership / spent / spectate / in-flight Intent — never GetMoveZone/CanDoAction.
     /// Host local play is allowed; Host emits via EventBus (see CommandSyncService HostEmit checklist).
     /// </summary>
     internal static class GuestMutationGate
@@ -61,19 +63,10 @@ namespace AnnW.LanMp.Patches
                 if (IntentValidateRules.IsUnitSpentForIntent(intentKind, unit.moved, unit.actioned, cateVal))
                     return false;
 
-                // Move range: match UX PrepareMoveOp args. DoAction legality waits for Host —
-                // Guest must not fail-fast CanDoAction (Host may lack train_template / FOW).
-                if (kind == Kind.UnitMoved && target.HasValue)
-                {
-                    if (!ActionLegality.TryValidateUnitMoved(
-                            unit, target.Value.x, target.Value.y, forHostAccept: false, out var moveErr))
-                    {
-                        var msg = ActionLegality.MapUserMessage(moveErr);
-                        if (!string.IsNullOrEmpty(msg))
-                            GateUtil.Toast(msg);
-                        return false;
-                    }
-                }
+                // Do NOT Guest-fail-fast UnitMoved/DoAction via ActionLegality.
+                // 0.18.2 added a second chokepoint for snappy toast; INV-VIEW FOW +
+                // GetMoveZone(true,true,true)≠PrepareMoveOp + missing extras → false
+                // 「无法移动…」/「无法执行…」(0.18.0 OK). Host Accept alone validates.
             }
             else if (kind == Kind.EndTurn || kind == Kind.Undo || kind == Kind.CastSkill)
             {
@@ -101,8 +94,7 @@ namespace AnnW.LanMp.Patches
                 return false;
             }
 
-            // DoAction: do not Guest-side CanDoAction fail-fast — Host Accept binds
-            // train_template from extrasJson and re-checks (Guest toast was false-negative).
+            // DoAction: never Guest-side CanDoAction — Host Accept binds extras + validates.
 
             var intent = plugin.Sync.BuildIntent(
                 KindToIntent(kind),

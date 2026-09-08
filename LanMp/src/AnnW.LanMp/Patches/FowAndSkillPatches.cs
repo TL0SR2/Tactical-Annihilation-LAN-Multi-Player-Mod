@@ -160,6 +160,9 @@ namespace AnnW.LanMp.Patches
         {
             private static bool Prefix(UI_SkillBtn __instance)
             {
+                if (GateUtil.IsSpectating())
+                    return false; // silent — button should already be hidden
+
                 if (!GateUtil.ShouldBlockUx(out var reason))
                 {
                     // Empty skill_action NRE guard (loadout miss / no-CO seats).
@@ -183,16 +186,108 @@ namespace AnnW.LanMp.Patches
         [HarmonyPatch(typeof(UI_SkillBtn), nameof(UI_SkillBtn.Render))]
         private static class Patch_UI_SkillBtn_Render
         {
-            private static bool Prefix()
+            private static bool Prefix(UI_SkillBtn __instance)
             {
                 try
                 {
+                    if (GateUtil.IsSpectating())
+                    {
+                        if (__instance != null)
+                            __instance.gameObject.SetActive(false);
+                        return false;
+                    }
+
                     var co = GS_Battle.self?.cur_player?.co_data;
                     if (co != null && co.skill_action == null)
-                        return false; // skip vanilla Render that assumes skill_action
+                    {
+                        // Vanilla Render NREs on null skill_action; keep button hidden.
+                        if (__instance != null)
+                            __instance.gameObject.SetActive(false);
+                        return false;
+                    }
+
+                    // Keep energy_max in sync so IsEnergyMax / percent match Host attach formula.
+                    if (co != null)
+                    {
+                        var max = CoEnergyRules.ComputeEnergyMax(co.skill_used_times);
+                        if (System.Math.Abs(co.energy_max - max) > 0.001f)
+                            co.energy_max = max;
+                    }
                 }
-                catch { /* fall through */ }
+                catch { /* fall through to vanilla */ }
                 return true;
+            }
+        }
+
+        /// <summary>
+        /// Vanilla UpdateRender shows the skill btn whenever cur_player is a non-AI human with
+        /// a skill SD — including a remote human while we spectate. Hide on LAN spectate;
+        /// on own turn refresh energy_max then let vanilla show + Render (full-energy ring).
+        /// </summary>
+        [HarmonyPatch(typeof(UI_Part_SkillPower), "UpdateRender")]
+        private static class Patch_SkillPower_UpdateRender
+        {
+            private static bool Prefix(UI_Part_SkillPower __instance)
+            {
+                if (__instance?.skillBtn == null)
+                    return true;
+
+                if (!GateUtil.LanArmed(out _))
+                    return true;
+
+                var battle = GS_Battle.self;
+                var cur = battle?.cur_player;
+                var co = cur?.co_data;
+                var hasSkill = false;
+                try { hasSkill = co?.skill != null; }
+                catch { hasSkill = false; }
+
+                var show = PresentationRules.ShouldShowCoSkillButton(
+                    inLanBattle: true,
+                    gatesArmed: true,
+                    isSpectating: GateUtil.IsSpectating(),
+                    curPlayerIsAi: cur != null && cur.is_ai,
+                    hasCoSkillSd: hasSkill);
+
+                if (!show)
+                {
+                    __instance.skillBtn.gameObject.SetActive(false);
+                    TrySetPingSkillBtn(false);
+                    return false;
+                }
+
+                // Own operable turn: align energy_max before vanilla Render / IsEnergyMax.
+                try
+                {
+                    if (co != null)
+                    {
+                        var max = CoEnergyRules.ComputeEnergyMax(co.skill_used_times);
+                        if (System.Math.Abs(co.energy_max - max) > 0.001f)
+                            co.energy_max = max;
+                    }
+                }
+                catch { /* ignore */ }
+
+                return true;
+            }
+
+            private static void Postfix(UI_Part_SkillPower __instance)
+            {
+                if (__instance?.skillBtn == null || !GateUtil.LanArmed(out _))
+                    return;
+                // Mirror ping target with button visibility (spectate hide / own-turn show).
+                TrySetPingSkillBtn(__instance.skillBtn.gameObject.activeSelf);
+            }
+
+            private static void TrySetPingSkillBtn(bool active)
+            {
+                try
+                {
+                    var ping = SingletonMono<SS_ANNW_Game>.self?.ui?.ping_manager;
+                    if (ping?.rt_skill_btn != null)
+                        ping.rt_skill_btn.gameObject.SetActive(active);
+                }
+                catch { /* ui may be missing */ }
             }
         }
 
@@ -263,6 +358,21 @@ namespace AnnW.LanMp.Patches
                     LanMpPlugin.Log?.LogInfo("[Gate] Blocked Guest RemoveUnit (play phase)");
                     return false;
                 }
+                return true;
+            }
+        }
+
+        /// <summary>
+        /// Belt-and-suspenders: never let LifeTime OnEffectEnd Die during Guest attach rebinds.
+        /// Real Host expiry still runs (no ApplyingRemoteCommand). Silent EffectHost clear is primary.
+        /// </summary>
+        [HarmonyPatch(typeof(UnitEffect_LifeTime), "OnEffectEnd")]
+        private static class Patch_LifeTime_OnEffectEnd
+        {
+            private static bool Prefix()
+            {
+                if (SyncContext.ApplyingRemoteCommand)
+                    return false;
                 return true;
             }
         }

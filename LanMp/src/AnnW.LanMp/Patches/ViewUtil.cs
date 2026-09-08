@@ -34,6 +34,9 @@ namespace AnnW.LanMp.Patches
         {
             if (unit == null)
                 return Fraction.NEUTRAL;
+            // Intent Accept must not INV-VIEW-rewrite ally FOW (same-faction Guest vs Host).
+            if (AnnW.LanMp.Sync.SyncContext.PreferUnitOwnerFowForMoveZone)
+                return unit.fraction;
             if (!GateUtil.LanArmed(out var plugin) || battle == null)
                 return unit.fraction;
 

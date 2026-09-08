@@ -899,7 +899,8 @@ namespace AnnW.LanMp.Sync
             ResultAttachmentDto attach,
             string commandKind,
             bool snapPositions,
-            bool removeMissingUnits = true)
+            bool removeMissingUnits = true,
+            bool applyWrecks = true)
         {
             if (!ResultAttachmentCodec.HasPayload(attach))
                 return;
@@ -921,7 +922,8 @@ namespace AnnW.LanMp.Sync
                 snapPositions,
                 AttachmentApplyPolicy.ShouldApplyPlayerResources(mode),
                 seatFilter,
-                removeMissingUnits);
+                removeMissingUnits,
+                applyWrecks);
         }
 
         /// <summary>
@@ -1420,8 +1422,8 @@ namespace AnnW.LanMp.Sync
                     return false;
                 }
 
-                // ExecuteAction / DoActionInstant do not re-check UX range — Intent must.
-                // Bind BUILD/TRAIN template from extras before CanDoAction (TrainUnit needs it).
+                // INV-ACCEPT: Host ActionLegality only (geometry hard / FOW soft).
+                // Bind BUILD/TRAIN/UNLOAD UX from extras before CanDoAction.
                 if (intent.kind == "DoAction")
                 {
                     if (!ActionLegality.TryValidateDoAction(
@@ -1432,7 +1434,7 @@ namespace AnnW.LanMp.Sync
                 else if (intent.kind == "UnitMoved")
                 {
                     if (!ActionLegality.TryValidateUnitMoved(
-                            unit, intent.targetX, intent.targetY, forHostAccept: true, out error))
+                            unit, intent.targetX, intent.targetY, out error))
                         return false;
                 }
             }
@@ -1554,7 +1556,9 @@ namespace AnnW.LanMp.Sync
 
             if (cmd.kind == "EndTurn")
             {
-                ApplyGuestEndTurn(cmd);
+                // LifeTime skill summons expire on Host UnitData.EndTurn → Die → absent from
+                // CaptureBoard. Present death then remove (same pattern as CastSkill orphans).
+                yield return CoApplyGuestEndTurn(cmd);
                 yield break;
             }
 
@@ -1603,8 +1607,76 @@ namespace AnnW.LanMp.Sync
             }
         }
 
+        private IEnumerator CoApplyGuestEndTurn(CommandDto cmd)
+        {
+            BattleSyncTrace.EvCommand("CmdApply", cmd, detail: "EndTurn");
+            var idsBefore = ActionPresentation.SnapshotAliveIds();
+            ResultAttachmentDto attach = null;
+            try { attach = ResultAttachmentCodec.FromJson(cmd.resultAttachmentJson); }
+            catch (Exception ex)
+            {
+                _log.LogWarning("[Sync] EndTurn attach: " + ex.Message);
+            }
+
+            if (ResultAttachmentCodec.HasPayload(attach))
+            {
+                // Orphans = Host LifeTime / combat / wipe removals this turn boundary.
+                var doomed = ActionPresentation.CollectMissingUnits(idsBefore, attach);
+                var deferOrphans = doomed != null && doomed.Count > 0;
+
+                ApplyResultAttachment(attach, cmd.kind, snapPositions: true,
+                    removeMissingUnits: !deferOrphans, applyWrecks: !deferOrphans);
+
+                if (deferOrphans)
+                    yield return CoPresentDeferredDeathsAndWrecks(doomed, attach, attacker: null);
+            }
+
+            if (TurnAuth != null)
+            {
+                TurnAuth.ApplyCursorFromCommand(cmd);
+                TurnAuth.BeginGuestWatchIfNeeded();
+            }
+            else
+                _log.LogWarning("[Sync] EndTurn without TurnAuth");
+
+            LanMpPlugin.Instance?.Checksum?.GuestVerifyEndTurn(cmd);
+        }
+
+        /// <summary>
+        /// Guest death presentation then authoritative remove + wreck puddle stamp.
+        /// Waits size-aware lead so buildings reach Event_DieExplode (debris) before Dispose.
+        /// </summary>
+        private IEnumerator CoPresentDeferredDeathsAndWrecks(
+            List<UnitData> doomed,
+            ResultAttachmentDto attach,
+            UnitData attacker)
+        {
+            var lead = ActionPresentation.KickUnitDeathVisuals(doomed, attacker, _log);
+            if (lead > 0.001f)
+                yield return lead;
+
+            var hostIds = new HashSet<int>();
+            if (attach?.units != null)
+            {
+                foreach (var us in attach.units)
+                {
+                    if (us != null)
+                        hostIds.Add(us.unitId);
+                }
+            }
+
+            using (SyncContext.BeginRemoteApply())
+            {
+                ResultAttachmentBridge.RemoveUnitsMissingFromHost(hostIds, GS_Battle.self, _log);
+                // Puddle after Dispose so WreckRenderer sees cleared tiles (ADR-003 R4).
+                ResultAttachmentBridge.ApplyWrecks(attach?.wrecks, GS_Battle.self, _log);
+            }
+        }
+
+        /// <summary>Legacy sync entry (Host-local / non-queue); prefer <see cref="CoApplyGuestEndTurn"/>.</summary>
         private void ApplyGuestEndTurn(CommandDto cmd)
         {
+            // Keep for any non-coroutine callers; no death lead-in.
             BattleSyncTrace.EvCommand("CmdApply", cmd, detail: "EndTurn");
             try
             {
@@ -1765,7 +1837,7 @@ namespace AnnW.LanMp.Sync
             switch (cmd.kind)
             {
                 case "EndTurn":
-                    // Host Accept path only — Guest uses ApplyGuestEndTurn via queue.
+                    // Host Accept path only — Guest uses CoApplyGuestEndTurn via queue.
                     ApplyEndTurnHostLocal();
                     break;
                 case "DoAction":
@@ -1930,32 +2002,10 @@ namespace AnnW.LanMp.Sync
             var deferOrphans = doomed != null && doomed.Count > 0;
 
             ApplyResultAttachment(attachEarly, "DoAction", snapPositions: false,
-                removeMissingUnits: !deferOrphans);
+                removeMissingUnits: !deferOrphans, applyWrecks: !deferOrphans);
 
             if (deferOrphans)
-            {
-                foreach (var victim in doomed)
-                {
-                    if (victim == null || victim.dead)
-                        continue;
-                    ActionPresentation.KickUnitDeathVisual(victim, unit, victim.hp_cur, _log);
-                }
-
-                yield return CombatPresentationRules.DeathVisualLeadSeconds;
-
-                var hostIds = new HashSet<int>();
-                if (attachEarly?.units != null)
-                {
-                    foreach (var us in attachEarly.units)
-                    {
-                        if (us != null)
-                            hostIds.Add(us.unitId);
-                    }
-                }
-
-                using (SyncContext.BeginRemoteApply())
-                    ResultAttachmentBridge.RemoveUnitsMissingFromHost(hostIds, GS_Battle.self, _log);
-            }
+                yield return CoPresentDeferredDeathsAndWrecks(doomed, attachEarly, attacker: unit);
 
             ActionPresentation.AfterAttachApply(attachEarly, _log, cmd, idsBefore);
             // ADR-001: Host attachment owns actioned/moved (factories may keep acting while bp_left>0).
@@ -1997,32 +2047,10 @@ namespace AnnW.LanMp.Sync
             var deferOrphans = doomed != null && doomed.Count > 0;
 
             ApplyResultAttachment(attach, "CastSkill", snapPositions: true,
-                removeMissingUnits: !deferOrphans);
+                removeMissingUnits: !deferOrphans, applyWrecks: !deferOrphans);
 
             if (deferOrphans)
-            {
-                foreach (var victim in doomed)
-                {
-                    if (victim == null || victim.dead)
-                        continue;
-                    ActionPresentation.KickUnitDeathVisual(victim, null, victim.hp_cur, _log);
-                }
-
-                yield return CombatPresentationRules.DeathVisualLeadSeconds;
-
-                var hostIds = new HashSet<int>();
-                if (attach.units != null)
-                {
-                    foreach (var us in attach.units)
-                    {
-                        if (us != null)
-                            hostIds.Add(us.unitId);
-                    }
-                }
-
-                using (SyncContext.BeginRemoteApply())
-                    ResultAttachmentBridge.RemoveUnitsMissingFromHost(hostIds, GS_Battle.self, _log);
-            }
+                yield return CoPresentDeferredDeathsAndWrecks(doomed, attach, attacker: null);
 
             ActionPresentation.AfterAttachApply(attach, _log, cmd, idsBefore);
             RemoteTurnPresentation.RefreshLocalVision(_log);

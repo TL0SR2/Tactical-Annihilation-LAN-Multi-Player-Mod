@@ -94,13 +94,16 @@ namespace AnnW.LanMp.Ui
                     LanSeatCell.AddCoButton(row, ColCo, CoLabel(seat), prefEditable, () =>
                     {
                         if (!prefEditable) return;
-                        OpenCoSelect(chosen =>
+                        OpenCoSelect((coId, skillId, psIds) =>
                         {
                             LanMpPlugin.Instance?.Lobby.RequestSeatEdit(new SeatEditRequest
                             {
                                 seatIndex = idx,
                                 setCoId = true,
-                                coId = chosen
+                                coId = coId,
+                                setLoadout = true,
+                                skillId = skillId ?? "",
+                                psIds = psIds
                             });
                             onChanged?.Invoke();
                         });
@@ -319,16 +322,17 @@ namespace AnnW.LanMp.Ui
         }
 
         /// <summary>
-        /// Pick CO id without mutating Lobby.Draft (Guest must not write authority draft).
+        /// Pick CO + skill/PS without mutating Lobby.Draft (Guest must not write authority draft).
+        /// UI_CO_SelectResult.skill / list_ps must be forwarded (Zero + free-slot).
         /// </summary>
-        private static void OpenCoSelect(Action<string> onPicked)
+        private static void OpenCoSelect(Action<string, string, string[]> onPicked)
         {
             try
             {
                 var floater = UI_Floater.self;
                 if (floater == null || floater.co_select == null)
                 {
-                    onPicked?.Invoke(NextCoFallback(null));
+                    onPicked?.Invoke(NextCoFallback(null), "", new string[0]);
                     return;
                 }
 
@@ -342,14 +346,39 @@ namespace AnnW.LanMp.Ui
                         id = item.is_random ? "" : "__none__";
                     else
                         id = item.sd_co.name;
-                    onPicked?.Invoke(id);
+
+                    var skillId = "";
+                    try
+                    {
+                        if (result.skill != null && !string.IsNullOrEmpty(result.skill.name))
+                            skillId = result.skill.name;
+                    }
+                    catch { /* ignore */ }
+
+                    string[] psIds = new string[0];
+                    try
+                    {
+                        if (result.list_ps != null && result.list_ps.Count > 0)
+                        {
+                            var list = new List<string>();
+                            foreach (var ps in result.list_ps)
+                            {
+                                if (ps != null && !string.IsNullOrEmpty(ps.name) && !list.Contains(ps.name))
+                                    list.Add(ps.name);
+                            }
+                            psIds = list.ToArray();
+                        }
+                    }
+                    catch { /* ignore */ }
+
+                    onPicked?.Invoke(id, skillId, psIds);
                 });
                 LanDropMenu.BringFloaterPopupToFront(floater.co_select);
             }
             catch (Exception ex)
             {
                 LanMpPlugin.Log?.LogWarning("[RoomUI] CO select failed: " + ex.Message);
-                onPicked?.Invoke(NextCoFallback(null));
+                onPicked?.Invoke(NextCoFallback(null), "", new string[0]);
             }
         }
 

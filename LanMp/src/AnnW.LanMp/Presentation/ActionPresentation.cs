@@ -24,6 +24,8 @@ namespace AnnW.LanMp.Presentation
             AccessTools.Method(typeof(SoundUtils), "PlaySound_ActionLaunch", new[] { typeof(ActionData) });
         private static readonly MethodInfo PlayHitMethod =
             AccessTools.Method(typeof(SoundUtils), "PlaySound_ActionHit", new[] { typeof(SD_ANNW_ACTION) });
+        private static readonly MethodInfo UnitReDrawMi =
+            AccessTools.Method(typeof(UnitData), "ReDraw", new[] { typeof(bool) });
 
         internal static HashSet<int> SnapshotAliveIds()
         {
@@ -103,16 +105,27 @@ namespace AnnW.LanMp.Presentation
 
         /// <summary>
         /// Kick vanilla death VFX coroutine (GameController CoroutineObject). Caller must delay
-        /// before RemoveUnit/Dispose so mesh/VFX are not torn down instantly.
+        /// <see cref="CombatPresentationRules.DeathVisualLeadSecondsForChassisSize"/> before
+        /// RemoveUnit/Dispose so size&gt;1 buildings can reach Event_DieExplode (debris).
+        /// Returns the recommended yield seconds for this victim.
         /// </summary>
-        internal static void KickUnitDeathVisual(
+        internal static float KickUnitDeathVisual(
             UnitData victim,
             UnitData attacker,
             float damageHint,
             ManualLogSource log = null)
         {
             if (victim == null || GameAPI.self == null)
-                return;
+                return 0f;
+
+            // Mirror UnitData.Die presentation prelude (without CreateWreck / authority).
+            try
+            {
+                victim.dying = true;
+                UnitReDrawMi?.Invoke(victim, new object[] { true });
+            }
+            catch { /* ignore */ }
+
             try
             {
                 PresentHpDamageFloat(victim, victim.hp_cur, 0f, log);
@@ -134,6 +147,41 @@ namespace AnnW.LanMp.Presentation
             {
                 log?.LogWarning("[Presentation] PlayUnitDeathAnimation: " + ex.Message);
             }
+
+            return DeathVisualLeadFor(victim);
+        }
+
+        /// <summary>Kick death visuals for all doomed units; return max lead seconds to yield.</summary>
+        internal static float KickUnitDeathVisuals(
+            System.Collections.Generic.IList<UnitData> doomed,
+            UnitData attacker,
+            ManualLogSource log = null)
+        {
+            var maxLead = 0f;
+            if (doomed == null)
+                return maxLead;
+            for (var i = 0; i < doomed.Count; i++)
+            {
+                var victim = doomed[i];
+                if (victim == null || victim.dead)
+                    continue;
+                var lead = KickUnitDeathVisual(victim, attacker, victim.hp_cur, log);
+                if (lead > maxLead)
+                    maxLead = lead;
+            }
+            return maxLead;
+        }
+
+        internal static float DeathVisualLeadFor(UnitData unit)
+        {
+            var size = 1;
+            try
+            {
+                if (unit != null)
+                    size = unit.size;
+            }
+            catch { size = 1; }
+            return CombatPresentationRules.DeathVisualLeadSecondsForChassisSize(size);
         }
 
         /// <summary>Light CastSkill cue on Guest (ADR-003 R4) — no proc_CastSkill.</summary>
