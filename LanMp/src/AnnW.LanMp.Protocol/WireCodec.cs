@@ -25,6 +25,12 @@ namespace AnnW.LanMp.Protocol
         LobbyReject = 14,
         SeatEditRequest = 15,
         SeatEditNack = 16,
+        /// <summary>Guest → Host: need homemade map bytes (missing or hash mismatch).</summary>
+        LobbyMapRequest = 17,
+        /// <summary>Host → Guest: full .map body for user:{rel} ids.</summary>
+        LobbyMapTransfer = 18,
+        /// <summary>Host → Guest: cannot auto-sync (e.g. map too large) — Guest must prepare file locally.</summary>
+        LobbyMapTransferNack = 19,
         Intent = 20,
         Command = 21,
         IntentNack = 22,
@@ -52,7 +58,8 @@ namespace AnnW.LanMp.Protocol
 
     public static class WireCodec
     {
-        public const ushort ProtocolVersion = 4;
+        /// <summary>v5: LobbyMapRequest / LobbyMapTransfer for UserMaps sync.</summary>
+        public const ushort ProtocolVersion = 5;
 
         public static byte[] EncodeFrame(Envelope env)
         {

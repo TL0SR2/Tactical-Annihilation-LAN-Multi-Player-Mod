@@ -24,7 +24,9 @@ namespace AnnW.LanMp.Ui
             }
         }
 
-        public static void Push(string message)
+        public static void Push(string message) => Push(message, 4f);
+
+        public static void Push(string message, float toastSeconds)
         {
             if (string.IsNullOrEmpty(message))
                 return;
@@ -34,7 +36,8 @@ namespace AnnW.LanMp.Ui
                 Lines.RemoveAt(Lines.Count - 1);
 
             _toast = message;
-            _toastUntil = Time.unscaledTime + 4f;
+            var sec = toastSeconds > 0.5f ? toastSeconds : 4f;
+            _toastUntil = Time.unscaledTime + sec;
 
             LanMpPlugin.Log?.LogInfo("[UI] " + message);
             TryGameFloater(message);

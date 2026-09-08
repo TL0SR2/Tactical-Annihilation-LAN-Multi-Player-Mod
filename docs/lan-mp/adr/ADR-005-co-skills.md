@@ -71,7 +71,7 @@
    - **禁止** Guest 用 `GS_CO.GetActual*` 自行决定 loadout。  
    - `BattleBootstrap` **删除**空 `skill`/`ps_list` 硬编码，改为消费座位字段。  
    - MVP 可落地「默认技」捷径：Host Bake 时若未选手动 skill，则解析默认并写入 DTO（仍走 B，而非两端静默 A）。  
-   - **房间选将：** `UI_CO_SelectResult.skill` / `list_ps` 经 `SeatEditRequest.setLoadout` 写入座位；`CoLoadoutResolver.StampSeat` 若已有著作者 loadout 则跳过，避免盖掉 Zero/自由栏。空座位再走表 → `GetActual*` → 解锁池随机。  
+   - **房间选将：** `UI_CO_SelectResult` / CUSTOM `temp_*` 经 `SeatEditRequest.setLoadout` 写入座位；打开弹窗须 `SetSelection` + 回填座位 loadout（避免 `SetAsCampaign` 档案默认盖掉著作者）；`Populate` 在 `for_skirmish` 下强制 CUSTOM。`StampSeat` 若已有著作者 loadout 则跳过。空座位再走表 → `GetActual*` → 解锁池随机。带 `setLoadout` 的 SeatEdit **不再**触发全员 AfterBake 重戳。  
    - **遭遇战自由栏 UI：** Harmony 修正 `PartPS.IsAvailable`（skirmish 解锁 index&lt;3）并抬升技/被动选择弹层。
 
 2. **能量（Phase 1）**  

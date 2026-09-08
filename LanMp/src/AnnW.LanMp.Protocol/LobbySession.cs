@@ -51,12 +51,28 @@ namespace AnnW.LanMp.Protocol
         public Action<LobbyDraftDto> AfterBakeCoLoadout { get; set; }
         public Func<bool> IsBattleStartedGate { get; set; }
 
+        /// <summary>Host: build transfer payload for <c>user:</c> mapId; null if N/A or read fail.</summary>
+        public Func<string, LobbyMapTransferPayload> HostBuildMapTransfer { get; set; }
+        /// <summary>Guest: true when local UserMaps missing or hash ≠ draft.</summary>
+        public Func<LobbyDraftDto, bool> GuestNeedsMapSync { get; set; }
+        /// <summary>Guest: local file hash for request (empty if missing).</summary>
+        public Func<LobbyDraftDto, string> GuestLocalMapHash { get; set; }
+        /// <summary>Guest: write/overwrite UserMaps from Host payload; return false on failure.</summary>
+        public Func<LobbyMapTransferPayload, bool> GuestApplyMapTransfer { get; set; }
+
         public event Action OnDraftChanged;
         public event Action OnReadyChanged;
         public event Action OnCanStartChanged;
         public event Action<LobbyStartPayload> OnLobbyStart;
         public event Action<LobbyRejectPayload> OnLobbyRejected;
         public event Action<SeatEditNack> OnSeatEditNack;
+        /// <summary>Guest: fired after a successful LobbyMapTransfer write (UI should ReloadMaps).</summary>
+        public event Action OnMapSynced;
+        /// <summary>Guest: auto-sync failed (too large / unavailable) — show toast &amp; ask user to copy map.</summary>
+        public event Action<LobbyMapTransferNackPayload> OnMapTransferFailed;
+
+        /// <summary>Guest: last transfer failure for room status line; cleared on successful sync.</summary>
+        public LobbyMapTransferNackPayload LastMapTransferNack { get; private set; }
 
         public LobbySession(NetSession net, ILanLogger log)
         {
@@ -322,7 +338,9 @@ namespace AnnW.LanMp.Protocol
                 ClearAllReady();
             else
                 ClearPeerReady(req.peerId);
-            if (req.setCoId)
+            // UI setLoadout already authored this seat — do not re-stamp defaults over it.
+            // Only fill empty seats when CO changed without a loadout payload.
+            if (req.setCoId && !req.setLoadout)
             {
                 try { AfterBakeCoLoadout?.Invoke(Draft); }
                 catch (Exception ex)
@@ -353,10 +371,46 @@ namespace AnnW.LanMp.Protocol
                     if (_net.Role == PeerRole.Guest)
                     {
                         Draft = JsonUtil.FromJson<LobbyDraftDto>(env.PayloadJson) ?? new LobbyDraftDto();
+                        if (LastMapTransferNack != null &&
+                            !string.Equals(LastMapTransferNack.mapId, Draft.mapId, StringComparison.OrdinalIgnoreCase))
+                            LastMapTransferNack = null;
                         OnDraftChanged?.Invoke();
                         _log.Info("[Lobby] Draft received map=" + Draft.mapId);
+                        MaybeRequestMapSync();
                     }
                     break;
+                case MsgType.LobbyMapRequest:
+                {
+                    if (_net.Role != PeerRole.Host)
+                        break;
+                    var req = JsonUtil.FromJson<LobbyMapRequestPayload>(env.PayloadJson);
+                    if (req == null || string.IsNullOrEmpty(env.SourcePeerId))
+                        break;
+                    _log.Info("[Lobby] MapRequest from=" + env.SourcePeerId + " map=" + req.mapId +
+                              " localHash=" + (req.localHash ?? ""));
+                    TrySendMapTransferTo(env.SourcePeerId, req.mapId, req.localHash);
+                    break;
+                }
+                case MsgType.LobbyMapTransfer:
+                {
+                    if (_net.Role != PeerRole.Guest)
+                        break;
+                    var transfer = JsonUtil.FromJson<LobbyMapTransferPayload>(env.PayloadJson);
+                    if (transfer == null)
+                        break;
+                    ApplyIncomingMapTransfer(transfer);
+                    break;
+                }
+                case MsgType.LobbyMapTransferNack:
+                {
+                    if (_net.Role != PeerRole.Guest)
+                        break;
+                    var nack = JsonUtil.FromJson<LobbyMapTransferNackPayload>(env.PayloadJson);
+                    if (nack == null)
+                        break;
+                    ApplyMapTransferNack(nack);
+                    break;
+                }
                 case MsgType.SeatEditRequest:
                 {
                     if (_net.Role != PeerRole.Host)
@@ -390,7 +444,7 @@ namespace AnnW.LanMp.Protocol
                         break;
                     }
                     ClearPeerReady(req.peerId);
-                    if (req.setCoId)
+                    if (req.setCoId && !req.setLoadout)
                     {
                         try { AfterBakeCoLoadout?.Invoke(Draft); }
                         catch (Exception ex)
@@ -470,6 +524,262 @@ namespace AnnW.LanMp.Protocol
                 Type = MsgType.LobbyDraft,
                 PayloadJson = JsonUtil.ToJson(Draft)
             });
+            // Homemade maps: push file body so Guests need not copy UserMaps manually.
+            TryBroadcastMapTransfer();
+        }
+
+        private void TryBroadcastMapTransfer()
+        {
+            if (_net.Role != PeerRole.Host || !_net.IsConnected)
+                return;
+            var mapId = Draft?.mapId;
+            if (string.IsNullOrEmpty(mapId) || HostBuildMapTransfer == null)
+                return;
+            LobbyMapTransferPayload payload;
+            try
+            {
+                payload = HostBuildMapTransfer(mapId);
+            }
+            catch (Exception ex)
+            {
+                _log.Warn("[Lobby] HostBuildMapTransfer failed: " + ex.Message);
+                return;
+            }
+            if (payload == null || string.IsNullOrEmpty(payload.contentBase64))
+                return;
+            if (!ValidateTransferSize(payload, out var sizeErr))
+            {
+                _log.Warn("[Lobby] Map transfer skipped: " + sizeErr);
+                NotifyMapTransferNack(null, mapId, LobbyMapTransferNackCode.TooLarge, sizeErr);
+                return;
+            }
+            var ok = _net.TryBroadcast(new Envelope
+            {
+                Type = MsgType.LobbyMapTransfer,
+                PayloadJson = JsonUtil.ToJson(payload)
+            });
+            _log.Info("[Lobby] MapTransfer broadcast map=" + payload.mapId +
+                      " b64=" + payload.contentBase64.Length + " ok=" + ok);
+        }
+
+        private void TrySendMapTransferTo(string peerId, string mapId, string guestLocalHash = null)
+        {
+            if (_net.Role != PeerRole.Host || string.IsNullOrEmpty(peerId) || HostBuildMapTransfer == null)
+                return;
+            var id = string.IsNullOrEmpty(mapId) ? Draft?.mapId : mapId;
+            if (string.IsNullOrEmpty(id))
+                return;
+            // Only serve the current draft map (do not let Guest request arbitrary paths).
+            if (!string.IsNullOrEmpty(Draft?.mapId) &&
+                !string.Equals(Draft.mapId, id, StringComparison.OrdinalIgnoreCase))
+            {
+                _log.Warn("[Lobby] MapRequest denied — not current draft map req=" + id);
+                return;
+            }
+            if (!string.IsNullOrEmpty(guestLocalHash) &&
+                !string.IsNullOrEmpty(Draft?.mapContentHash) &&
+                string.Equals(guestLocalHash, Draft.mapContentHash, StringComparison.OrdinalIgnoreCase))
+            {
+                _log.Info("[Lobby] MapRequest skip — Guest hash already matches");
+                return;
+            }
+            LobbyMapTransferPayload payload;
+            try
+            {
+                payload = HostBuildMapTransfer(id);
+            }
+            catch (Exception ex)
+            {
+                _log.Warn("[Lobby] HostBuildMapTransfer failed: " + ex.Message);
+                NotifyMapTransferNack(peerId, id, LobbyMapTransferNackCode.Unavailable, ex.Message);
+                return;
+            }
+            if (payload == null || string.IsNullOrEmpty(payload.contentBase64))
+            {
+                _log.Warn("[Lobby] MapTransfer empty for map=" + id);
+                NotifyMapTransferNack(peerId, id, LobbyMapTransferNackCode.Unavailable, "empty");
+                return;
+            }
+            if (!ValidateTransferSize(payload, out var sizeErr))
+            {
+                _log.Warn("[Lobby] Map transfer skipped: " + sizeErr);
+                NotifyMapTransferNack(peerId, id, LobbyMapTransferNackCode.TooLarge, sizeErr);
+                return;
+            }
+            var ok = _net.TrySendTo(peerId, new Envelope
+            {
+                Type = MsgType.LobbyMapTransfer,
+                PayloadJson = JsonUtil.ToJson(payload)
+            });
+            _log.Info("[Lobby] MapTransfer to=" + peerId + " map=" + payload.mapId +
+                      " b64=" + payload.contentBase64.Length + " ok=" + ok);
+        }
+
+        private void NotifyMapTransferNack(
+            string peerIdOrNull,
+            string mapId,
+            LobbyMapTransferNackCode code,
+            string detail)
+        {
+            if (_net.Role != PeerRole.Host || !_net.IsConnected)
+                return;
+            var rel = RelativePathFromUserMapId(mapId);
+            var message = code == LobbyMapTransferNackCode.TooLarge
+                ? "自制地图过大，无法自动同步。请自行将相同 .map 放入本机 UserMaps"
+                  + (string.IsNullOrEmpty(rel) ? "" : "（相对路径：" + rel + "）")
+                  + "，内容须与房主一致后再点准备。"
+                : "房主无法下发自制地图，请自行将相同 .map 放入本机 UserMaps"
+                  + (string.IsNullOrEmpty(rel) ? "" : "（相对路径：" + rel + "）")
+                  + " 后再点准备。";
+            var nack = new LobbyMapTransferNackPayload
+            {
+                mapId = mapId ?? "",
+                code = (int)code,
+                message = message,
+                relativePath = rel ?? ""
+            };
+            var env = new Envelope
+            {
+                Type = MsgType.LobbyMapTransferNack,
+                PayloadJson = JsonUtil.ToJson(nack)
+            };
+            bool ok;
+            if (!string.IsNullOrEmpty(peerIdOrNull))
+                ok = _net.TrySendTo(peerIdOrNull, env);
+            else
+                ok = _net.TryBroadcast(env);
+            _log.Info("[Lobby] MapTransferNack code=" + code + " map=" + mapId +
+                      " detail=" + detail + " ok=" + ok);
+        }
+
+        private static string RelativePathFromUserMapId(string mapId)
+        {
+            if (string.IsNullOrEmpty(mapId))
+                return "";
+            const string prefix = "user:";
+            if (mapId.Length > prefix.Length &&
+                mapId.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+                return mapId.Substring(prefix.Length).Replace('\\', '/').TrimStart('/');
+            return mapId;
+        }
+
+        private void MaybeRequestMapSync()
+        {
+            if (_net.Role != PeerRole.Guest || !_net.IsConnected)
+                return;
+            if (GuestNeedsMapSync == null || Draft == null)
+                return;
+            bool need;
+            try
+            {
+                need = GuestNeedsMapSync(Draft);
+            }
+            catch (Exception ex)
+            {
+                _log.Warn("[Lobby] GuestNeedsMapSync failed: " + ex.Message);
+                return;
+            }
+            if (!need)
+                return;
+            var localHash = "";
+            try
+            {
+                if (GuestLocalMapHash != null)
+                    localHash = GuestLocalMapHash(Draft) ?? "";
+            }
+            catch (Exception ex)
+            {
+                _log.Warn("[Lobby] GuestLocalMapHash failed: " + ex.Message);
+            }
+            _net.TrySend(new Envelope
+            {
+                Type = MsgType.LobbyMapRequest,
+                PayloadJson = JsonUtil.ToJson(new LobbyMapRequestPayload
+                {
+                    mapId = Draft.mapId ?? "",
+                    localHash = localHash
+                })
+            });
+            _log.Info("[Lobby] MapRequest sent map=" + Draft.mapId + " localHash=" + localHash);
+        }
+
+        private void ApplyIncomingMapTransfer(LobbyMapTransferPayload transfer)
+        {
+            if (transfer == null || GuestApplyMapTransfer == null)
+                return;
+            if (!string.IsNullOrEmpty(Draft?.mapId) &&
+                !string.IsNullOrEmpty(transfer.mapId) &&
+                !string.Equals(Draft.mapId, transfer.mapId, StringComparison.OrdinalIgnoreCase))
+            {
+                _log.Warn("[Lobby] MapTransfer ignored — mapId≠draft " + transfer.mapId);
+                return;
+            }
+            bool ok;
+            try
+            {
+                ok = GuestApplyMapTransfer(transfer);
+            }
+            catch (Exception ex)
+            {
+                _log.Warn("[Lobby] GuestApplyMapTransfer failed: " + ex.Message);
+                return;
+            }
+            if (!ok)
+            {
+                _log.Warn("[Lobby] MapTransfer apply failed map=" + transfer.mapId);
+                return;
+            }
+            _log.Info("[Lobby] MapTransfer applied map=" + transfer.mapId + " hash=" + transfer.mapContentHash);
+            LastMapTransferNack = null;
+            try { OnMapSynced?.Invoke(); }
+            catch (Exception ex) { _log.Warn("[Lobby] OnMapSynced: " + ex.Message); }
+            OnDraftChanged?.Invoke();
+        }
+
+        private void ApplyMapTransferNack(LobbyMapTransferNackPayload nack)
+        {
+            if (nack == null)
+                return;
+            // Only surface when Guest still needs the map (already-synced peers ignore).
+            var stillNeed = true;
+            try
+            {
+                if (GuestNeedsMapSync != null && Draft != null)
+                    stillNeed = GuestNeedsMapSync(Draft);
+            }
+            catch
+            {
+                stillNeed = true;
+            }
+            if (!stillNeed)
+            {
+                _log.Info("[Lobby] MapTransferNack ignored — local map already OK");
+                return;
+            }
+            if (string.IsNullOrEmpty(nack.message))
+            {
+                nack.message = nack.code == (int)LobbyMapTransferNackCode.TooLarge
+                    ? "自制地图过大，无法自动同步，请自行准备 UserMaps 中的相同文件后再准备。"
+                    : "无法自动同步自制地图，请自行准备后再准备。";
+            }
+            LastMapTransferNack = nack;
+            _log.Warn("[Lobby] MapTransferNack code=" + nack.code + " map=" + nack.mapId + " msg=" + nack.message);
+            try { OnMapTransferFailed?.Invoke(nack); }
+            catch (Exception ex) { _log.Warn("[Lobby] OnMapTransferFailed: " + ex.Message); }
+            OnDraftChanged?.Invoke();
+        }
+
+        /// <summary>Wire frame max ~2MB; Base64 + Envelope JSON headroom.</summary>
+        private static bool ValidateTransferSize(LobbyMapTransferPayload payload, out string error)
+        {
+            error = null;
+            const int maxB64 = 1_400_000;
+            if (payload?.contentBase64 != null && payload.contentBase64.Length > maxB64)
+            {
+                error = "map too large (b64 " + payload.contentBase64.Length + " > " + maxB64 + ")";
+                return false;
+            }
+            return true;
         }
 
         private void RecomputeCanStart()

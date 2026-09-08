@@ -47,7 +47,7 @@ ADR-001 要求 Host 权威，但实现曾让 Host/Guest **各自**跑 `MannualEn
 7. MatchEnd 多席结果；仅 Host 判胜。  
 8. **INV-VIEW：** LAN 下 `last_human_player` = 本机 FOW/UI 视角，**不是**当前行动的远端人类席；禁止与 FOWDirty 重绑定互殴（会主线程死锁）。  
 9. Host 权威 EndTurn Accept **只**用 `SuppressNetworkEmit`，不用 `ApplyingRemoteCommand`。  
-10. AnnW `CoroutineObject`：**禁止** `yield return null` 等待（同帧忙等）；帧等待用 `0f` / `AnnWCoroutine.NextTick`。
+10. AnnW `CoroutineObject`：**禁止** `yield return null` 等待（同帧忙等）；帧等待用 `0f` / `AnnWCoroutine.NextTick`。**ApplyQueue / Host Accept 边界必须经 `AnnWCoroutine.SafePump`**（展平嵌套 `IEnumerator`、null→NextTick），不得把原版 `DoMoveWithAni` 等直接挂进 CoroutineObject（否则 Apply 永久卡住 → Guest 假观战）。
 
 ## 后果
 

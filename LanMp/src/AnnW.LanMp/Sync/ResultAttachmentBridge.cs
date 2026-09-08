@@ -925,11 +925,16 @@ namespace AnnW.LanMp.Sync
             }
         }
 
+        // Effect.ClearMods is protected — peel SuperValue mods without OnEffectEnd side-effects.
+        private static readonly MethodInfo EffectClearModsMi =
+            AccessTools.Method(typeof(Effect), "ClearMods");
+
         /// <summary>
         /// ADR-005: EffectHost LoadOb from Host DynOb string (CastSkill / PS buffs / LifeTime).
         /// Must NOT call <c>RemoveAll()</c> — that fires <c>OnEffectEnd</c>, and
         /// <c>UnitEffect_LifeTime.OnEffectEnd</c> always <c>Die(LIFE_TIME)</c>, which would
         /// false-kill still-alive skill summons on every Guest attach re-bind.
+        /// Silent clear still peels <c>ClearMods</c> so Guest SuperValue (hp/atk) does not stack.
         /// </summary>
         private static void ApplyEffectHostJson(
             EffectHost host,
@@ -956,7 +961,9 @@ namespace AnnW.LanMp.Sync
 
         /// <summary>
         /// Drop effects without <c>OnEffectEnd</c> (Host attachment is truth; Guest must not
-        /// re-simulate LifeTime / MindControl end side-effects).
+        /// re-simulate LifeTime Die / MindControl ownership restore).
+        /// Still must <c>ClearMods</c> so SuperValue (hp_max/atk/…) orphans are not stacked
+        /// on every attach rebind — otherwise Guest displays explode after a few Commands.
         /// </summary>
         internal static void ClearEffectHostSilent(EffectHost host)
         {
@@ -969,8 +976,12 @@ namespace AnnW.LanMp.Sync
                     for (var i = 0; i < host.effects.Count; i++)
                     {
                         var e = host.effects[i];
-                        if (e != null)
-                            e.host = null;
+                        if (e == null)
+                            continue;
+                        // Protected Effect.ClearMods — strip SuperMod from dic_sv without side-effects.
+                        try { EffectClearModsMi?.Invoke(e, null); }
+                        catch { /* best-effort; continue unlinking */ }
+                        e.host = null;
                     }
                     host.effects.Clear();
                 }

@@ -38,14 +38,26 @@ namespace AnnW.LanMp.Patches
                 return false;
             if (Presentation.PresentationContext.ControlGrantPending)
                 return true;
-            var sync = plugin.Sync;
-            if (sync != null && !sync.IsApplyQueueIdle)
-            {
-                var local = plugin.Authority.GetLocalHumanSlotIndex();
-                if (local.HasValue && battle.cur_player.index == local.Value && !battle.cur_player.is_ai)
-                    return true;
-            }
+            // Do NOT treat own-turn ApplyQueue busy as "spectate" — that paints
+            // 「观战回合，操作者：自己」and hides EndTurn while Host still expects Guest play.
+            // Soft-block stays in ShouldBlockUx / GuestMayEmitIntent.
             return plugin.Authority.ShouldBlockLocalInput(battle.cur_player.index);
+        }
+
+        /// <summary>Own turn but remote Command apply / control-grant still running.</summary>
+        internal static bool IsOwnTurnSyncBusy()
+        {
+            if (!LanArmed(out var plugin))
+                return false;
+            if (Presentation.PresentationContext.ControlGrantPending)
+                return true;
+            var sync = plugin.Sync;
+            if (sync == null || sync.IsApplyQueueIdle)
+                return false;
+            var battle = GS_Battle.self;
+            var local = plugin.Authority.GetLocalHumanSlotIndex();
+            return battle?.cur_player != null && local.HasValue &&
+                   battle.cur_player.index == local.Value && !battle.cur_player.is_ai;
         }
 
         internal static bool ShouldBlockUx(out string reason)
@@ -60,22 +72,10 @@ namespace AnnW.LanMp.Patches
                 reason = "状态校验暂停中";
                 return true;
             }
-            if (Presentation.PresentationContext.ControlGrantPending)
+            if (IsOwnTurnSyncBusy())
             {
                 reason = null;
                 return true;
-            }
-            var sync = plugin.Sync;
-            if (sync != null && !sync.IsApplyQueueIdle)
-            {
-                var battleEarly = GS_Battle.self;
-                var localEarly = plugin.Authority.GetLocalHumanSlotIndex();
-                if (battleEarly?.cur_player != null && localEarly.HasValue &&
-                    battleEarly.cur_player.index == localEarly.Value && !battleEarly.cur_player.is_ai)
-                {
-                    reason = null;
-                    return true;
-                }
             }
             var battle = GS_Battle.self;
             if (battle?.cur_player == null)
@@ -114,7 +114,7 @@ namespace AnnW.LanMp.Patches
             return true;
         }
 
-        /// <summary>Guest Intent only on own turn after play starts, and not while awaiting Host.</summary>
+        /// <summary>Guest Intent only on own turn after play starts, and not while awaiting Host / applying.</summary>
         internal static bool GuestMayEmitIntent(LanMpPlugin plugin)
         {
             if (plugin == null || plugin.Net.Role != PeerRole.Guest)
@@ -125,6 +125,10 @@ namespace AnnW.LanMp.Patches
             if (battle?.cur_player == null)
                 return false;
             if (!plugin.Authority.IsLocalPlayersTurn(battle.cur_player.index))
+                return false;
+            // Block while ApplyQueue holds ApplyingRemoteCommand — early await-clear used to
+            // allow a second CastSkill before energy attach landed (Host: energy not full).
+            if (plugin.Sync != null && !plugin.Sync.IsApplyQueueIdle)
                 return false;
             if (plugin.Sync != null && !plugin.Sync.GuestCanEmitIntent(out _))
                 return false;

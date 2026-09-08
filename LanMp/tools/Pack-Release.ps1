@@ -77,6 +77,33 @@ Install
 3. Launch AnnW.exe once. BepInEx will generate config under BepInEx\config\.
 4. Main menu -> Skirmish -> LAN Multiplayer lobby.
 
+Custom maps (UserMaps) / 自制地图
+--------------------------------
+LAN room lists the same homemade maps as the vanilla skirmish browser.
+Official maps stay in the game package; custom .map files go under the
+game profile UserMaps folder (NOT the Steam game install folder).
+
+Default path (Windows):
+  Documents\My Games\Tactical Annihilation\<SteamId or Default>\UserMaps\
+
+Examples:
+  ...\Documents\My Games\Tactical Annihilation\7656119xxxxxxxxx\UserMaps\
+  ...\Documents\My Games\Tactical Annihilation\Default\UserMaps\
+
+Notes:
+- Put .map files here (subfolders OK). Both Host and Guest must have the
+  same relative path + same file content for that map.
+- Small maps can be auto-synced from Host to Guest over LAN; very large
+  maps cannot — Guest must copy the file into UserMaps manually (the
+  room will show a toast when transfer is skipped).
+- If the game Options use a custom local data path, UserMaps is under
+  that custom root instead: <custom_root>\UserMaps\
+
+自制地图说明（中文）:
+- 官方遭遇战图在游戏资源内；自制图目录由游戏 ProfileFileSystem 决定。
+- 默认：文档\My Games\Tactical Annihilation\<SteamId 或 Default>\UserMaps\
+- 联机房间与游戏内遭遇战自制图列表同一目录；过大地图需双方自行放入。
+
 Contents
 --------
 - BepInEx 5.4.x (win_x64 Doorstop)

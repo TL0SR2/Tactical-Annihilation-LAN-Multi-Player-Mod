@@ -3,13 +3,14 @@ using System.Collections;
 using System.Collections.Generic;
 using AnnW.LanMp.Protocol;
 using BepInEx.Logging;
-using UnityEngine;
 
 namespace AnnW.LanMp.Sync
 {
     /// <summary>
     /// ADR-004 INV-T3: single-consumer serial apply of battle Commands.
     /// Prevents DoAction animation overlapping EndTurn and corrupting SyncContext flags.
+    /// INV-T10: all apply bodies are driven through <see cref="AnnWCoroutine.SafePump"/> so
+    /// nested vanilla enumerators that <c>yield null</c> cannot busy-spin CoroutineObject.
     /// </summary>
     public sealed class CommandApplyQueue
     {
@@ -57,6 +58,7 @@ namespace AnnW.LanMp.Sync
             if (gc != null)
             {
                 _running = true;
+                // GameController : CoroutineObject — SafePump yields only float NextTick.
                 gc.StartCoroutine(CoPump());
                 return;
             }
@@ -86,16 +88,24 @@ namespace AnnW.LanMp.Sync
                     SyncContext.SuppressNetworkEmit = true;
                     SyncContext.ApplyingRemoteCommand = true;
                     Exception error = null;
-                    var body = _applyBody(cmd);
+
+                    // Flatten + null→NextTick at the queue boundary (INV-T10).
+                    // Do NOT MoveNext the apply body here and yield its Current to CoroutineObject:
+                    // nested IEnumerator / null would busy-spin and stick ApplyingRemoteCommand.
+                    var pump = AnnWCoroutine.SafePump(
+                        _applyBody(cmd),
+                        AnnWCoroutine.DefaultApplyTimeoutSec,
+                        _log,
+                        "Apply:" + (cmd.kind ?? "?"));
                     while (true)
                     {
                         object current = null;
                         bool moved;
                         try
                         {
-                            moved = body.MoveNext();
+                            moved = pump.MoveNext();
                             if (moved)
-                                current = body.Current;
+                                current = pump.Current;
                         }
                         catch (Exception ex)
                         {
@@ -104,11 +114,13 @@ namespace AnnW.LanMp.Sync
                         }
                         if (!moved)
                             break;
-                        yield return current;
+                        // SafePump only yields float NextTick; keep belt-and-suspenders.
+                        yield return current ?? AnnWCoroutine.NextTick;
                     }
 
                     SyncContext.SuppressNetworkEmit = false;
                     SyncContext.ApplyingRemoteCommand = false;
+                    SyncContext.InApplyEnumerator = false;
 
                     if (error != null)
                         _log?.LogError("[ApplyQueue] apply failed kind=" + cmd.kind + ": " + error);
@@ -120,8 +132,8 @@ namespace AnnW.LanMp.Sync
             {
                 SyncContext.SuppressNetworkEmit = false;
                 SyncContext.ApplyingRemoteCommand = false;
+                SyncContext.InApplyEnumerator = false;
                 _running = false;
-                // More items may have arrived while finishing.
                 bool more;
                 lock (_queue) more = _queue.Count > 0;
                 if (more)

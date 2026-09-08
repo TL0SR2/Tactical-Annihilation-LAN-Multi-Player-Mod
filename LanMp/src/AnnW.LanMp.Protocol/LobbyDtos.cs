@@ -163,6 +163,40 @@ namespace AnnW.LanMp.Protocol
         public string message = "";
     }
 
+    /// <summary>Guest asks Host for homemade map body (mapId = user:relative.map).</summary>
+    public class LobbyMapRequestPayload
+    {
+        public string mapId = "";
+        /// <summary>Guest local hash if file exists; empty if missing.</summary>
+        public string localHash = "";
+    }
+
+    /// <summary>Host sends .map bytes; Guest writes under UserMaps (overwrite on hash mismatch).</summary>
+    public class LobbyMapTransferPayload
+    {
+        public string mapId = "";
+        public string mapDisplayName = "";
+        public string mapContentHash = "";
+        /// <summary>UTF-8 map file as Base64 (avoids JSON escape blow-up). Keep decoded size ≲ 900KB.</summary>
+        public string contentBase64 = "";
+    }
+
+    public enum LobbyMapTransferNackCode
+    {
+        Generic = 0,
+        TooLarge = 1,
+        Unavailable = 2
+    }
+
+    /// <summary>Host cannot push map body — Guest must place the file under UserMaps manually.</summary>
+    public class LobbyMapTransferNackPayload
+    {
+        public string mapId = "";
+        public int code = (int)LobbyMapTransferNackCode.Generic;
+        public string message = "";
+        public string relativePath = "";
+    }
+
     public class HelloPayload
     {
         public string peerId;

@@ -114,6 +114,10 @@ namespace AnnW.LanMp
             Lobby.IsBattleStartedGate = () => Lobby.StartAuthorized || Authority.InLanBattle;
             Lobby.CoPoolProvider = ListCoPool;
             Lobby.AfterBakeCoLoadout = draft => CoLoadoutResolver.StampDraft(draft, Log);
+            Lobby.HostBuildMapTransfer = mapId => LanRoomMapCatalog.TryBuildMapTransfer(mapId, Log);
+            Lobby.GuestNeedsMapSync = draft => LanRoomMapCatalog.NeedsUserMapSync(draft, Log);
+            Lobby.GuestLocalMapHash = draft => LanRoomMapCatalog.PeekLocalUserMapHash(draft, Log);
+            Lobby.GuestApplyMapTransfer = transfer => LanRoomMapCatalog.TryApplyMapTransfer(transfer, Log);
             TurnAuth = new TurnAuthority(Net, Authority, Log);
             Sync = new CommandSyncService(Net, Authority, AttachResultsOnCommands, Log);
             Sync.TurnAuth = TurnAuth;

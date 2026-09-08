@@ -27,7 +27,7 @@
 | B3 | `OnSkillCastStarted` 起 Suppress，召唤折进 CastSkill Capture |
 | B2 | `CastSkill` 资源 Apply=`AllPlayers` |
 | B1/B8 | `CoApplyCastSkillAttachOnly`：死亡演出 + `idsBefore` 召唤表现 |
-| B7 | `KickSkillCastCue` → `TriggerSkillCastStarted` |
+| B7 | `CoKickSkillCastVisual`：Started → `skill_action.DoActionAni` (+ banner) → Done（不 `AfterSkillCast`） |
 | B6 | CastSkill 后 `RefreshLocalVision` |
 | B5 | EffectHost `RemoveAll` 再 `LoadOb` |
 | B10 | `UI_SkillBtn` 空 skill 防护 |

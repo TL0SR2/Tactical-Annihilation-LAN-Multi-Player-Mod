@@ -1,4 +1,5 @@
 using System;
+using System.Collections;
 using System.Collections.Generic;
 using System.Reflection;
 using AnnW.LanMp.Protocol;
@@ -184,7 +185,88 @@ namespace AnnW.LanMp.Presentation
             return CombatPresentationRules.DeathVisualLeadSecondsForChassisSize(size);
         }
 
-        /// <summary>Light CastSkill cue on Guest (ADR-003 R4) — no proc_CastSkill.</summary>
+        /// <summary>
+        /// Guest CastSkill presentation (ADR-003 R4 / M07 B7) — mirrors Host
+        /// <c>CO_Data.proc_CastSkill</c> visual half only:
+        /// SkillCastStarted → skill_action.DoActionAni (+ secondary skill_actions) → SkillCastDone.
+        /// Never calls <c>AfterSkillCast</c> (energy/authority stay Host-attach).
+        /// </summary>
+        internal static IEnumerator CoKickSkillCastVisual(CommandDto cmd, ManualLogSource log = null)
+        {
+            try { BattleEventBus.self.TriggerSkillCastStarted(); }
+            catch (Exception ex)
+            {
+                log?.LogWarning("[Presentation] SkillCastStarted: " + ex.Message);
+            }
+
+            var co = GS_Battle.self?.cur_player?.co_data;
+            if (co?.skill_action == null)
+            {
+                try { BattleEventBus.self.TriggerSkillCastDone(); }
+                catch { /* ignore */ }
+                yield break;
+            }
+
+            // Skill-name banner (Unity WaitForSeconds coroutine — independent of CoroutineObject).
+            try
+            {
+                var pop = SingletonMono<SS_ANNW_Game>.self?.ui?.pop_skillcast;
+                if (pop != null && co.skill != null)
+                    pop.ShowForSkill(co.skill, null);
+            }
+            catch (Exception ex)
+            {
+                log?.LogWarning("[Presentation] pop_skillcast: " + ex.Message);
+            }
+
+            GameTileData tile = null;
+            try
+            {
+                if (cmd != null && cmd.hasTarget && GameAPI.self != null)
+                    tile = GameAPI.self.GetTile(new Inctor2(cmd.targetX, cmd.targetY));
+            }
+            catch { tile = null; }
+
+            // Primary skill_action DoActionAni (the cast-process mesh/VFX Host runs).
+            IEnumerator primary = null;
+            try { primary = co.skill_action.DoActionAni(tile, false); }
+            catch (Exception ex)
+            {
+                log?.LogWarning("[Presentation] skill DoActionAni: " + ex.Message);
+            }
+            if (primary != null)
+                yield return primary;
+
+            // Additional skill_actions[1..] — same order as proc_CastSkill.
+            var extras = co.skill_actions;
+            if (extras != null)
+            {
+                for (var i = 1; i < extras.Count; i++)
+                {
+                    var act = extras[i];
+                    if (act == null)
+                        continue;
+                    IEnumerator more = null;
+                    try { more = act.DoActionAni(tile, false); }
+                    catch (Exception ex)
+                    {
+                        log?.LogWarning("[Presentation] skill_actions[" + i + "] Ani: " + ex.Message);
+                    }
+                    if (more != null)
+                        yield return more;
+                }
+            }
+
+            try { BattleEventBus.self.TriggerSkillCastDone(); }
+            catch (Exception ex)
+            {
+                log?.LogWarning("[Presentation] SkillCastDone: " + ex.Message);
+            }
+        }
+
+        /// <summary>
+        /// Legacy fire-and-forget bus cue — prefer <see cref="CoKickSkillCastVisual"/> on Guest Apply.
+        /// </summary>
         internal static void KickSkillCastCue(ManualLogSource log = null)
         {
             try { BattleEventBus.self.TriggerSkillCastStarted(); }

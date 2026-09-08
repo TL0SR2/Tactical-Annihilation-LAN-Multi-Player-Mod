@@ -35,7 +35,8 @@ namespace AnnW.LanMp.Patches
             Inctor2? from = null,
             string extrasJson = null)
         {
-            if (SyncContext.ApplyingRemoteCommand || SyncContext.SuppressNetworkEmit)
+            // True only while pumping an apply enumerator MoveNext (not during yield waits).
+            if (SyncContext.InApplyEnumerator)
                 return true;
 
             if (!GateUtil.LanArmed(out var plugin))
@@ -48,6 +49,10 @@ namespace AnnW.LanMp.Patches
             // Host path (a): mutate locally; CommandSyncService EventBus emits Commands.
             if (plugin.Net.Role == PeerRole.Host)
                 return true;
+
+            // Guest: between ApplyQueue yields Suppress/Applying stay set — block UX, no local mutate.
+            if (SyncContext.ApplyingRemoteCommand || SyncContext.SuppressNetworkEmit)
+                return false;
 
             // --- Guest play phase: never mutate; Intent only ---
             if (kind == Kind.DoAction || kind == Kind.UnitMoved)

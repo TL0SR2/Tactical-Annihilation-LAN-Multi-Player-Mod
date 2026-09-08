@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using AnnW.LanMp.Protocol;
+using AnnW.LanMp.Ui;
 using BepInEx.Logging;
 using UnityEngine;
 
@@ -68,26 +69,41 @@ namespace AnnW.LanMp.Authority
                 return null;
             }
 
-            // 1) Resources TextAsset (e.g. Skirmish/MapName — game update dropped pack folder)
-            var ta = Resources.Load<TextAsset>(mapKey);
-            if (ta == null && !mapKey.StartsWith("Skirmish/", StringComparison.OrdinalIgnoreCase))
+            // Homemade: user:{relative under UserMaps} → this peer's absolute path (never trust remote abs paths).
+            string localUserMap = null;
+            if (LanRoomMapCatalog.IsUserMapId(mapKey))
             {
-                // Try resolve via SD_ANNW_SK_MAP name → Skirmish/{name}
-                try
+                if (!LanRoomMapCatalog.TryResolveUserMapAbsolute(mapKey, out localUserMap, log) ||
+                    !File.Exists(localUserMap))
                 {
-                    var sd = SDBase<SD_ANNW_SK_MAP>.Get(mapKey);
-                    if (sd != null)
-                    {
-                        // Game update: built-in path is Skirmish/{sd.name} (pack field removed).
-                        var path = "Skirmish/" + sd.name;
-                        ta = Resources.Load<TextAsset>(path);
-                        if (ta != null)
-                            mapKey = path;
-                    }
+                    log.LogError("[Bootstrap] User map missing locally: " + mapKey);
+                    log.LogError("[Bootstrap] Tip: copy the same .map into Documents/.../UserMaps with matching relative path");
+                    return null;
                 }
-                catch (Exception ex)
+            }
+
+            // 1) Resources TextAsset (e.g. Skirmish/MapName — game update dropped pack folder)
+            TextAsset ta = null;
+            if (localUserMap == null)
+            {
+                ta = Resources.Load<TextAsset>(mapKey);
+                if (ta == null && !mapKey.StartsWith("Skirmish/", StringComparison.OrdinalIgnoreCase))
                 {
-                    log.LogWarning("[Bootstrap] SD_ANNW_SK_MAP resolve failed: " + ex.Message);
+                    try
+                    {
+                        var sd = SDBase<SD_ANNW_SK_MAP>.Get(mapKey);
+                        if (sd != null)
+                        {
+                            var path = "Skirmish/" + sd.name;
+                            ta = Resources.Load<TextAsset>(path);
+                            if (ta != null)
+                                mapKey = path;
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        log.LogWarning("[Bootstrap] SD_ANNW_SK_MAP resolve failed: " + ex.Message);
+                    }
                 }
             }
 
@@ -99,18 +115,24 @@ namespace AnnW.LanMp.Authority
                 draft.mapId = mapKey;
                 draft.mapContentHash = HashUtil.StableHash16(ta.text);
             }
-            else if (File.Exists(mapKey))
+            else if (localUserMap != null || File.Exists(mapKey))
             {
-                ob = Singleton<BattleAndMapFileSystem>.self.ReadFileWithMeta_Local(mapKey);
-                sgs.file_path = mapKey;
-                sgs.filename = Path.GetFileNameWithoutExtension(mapKey);
+                var filePath = localUserMap ?? mapKey;
+                ob = Singleton<BattleAndMapFileSystem>.self.ReadFileWithMeta_Local(filePath);
+                sgs.file_path = filePath;
+                sgs.filename = Path.GetFileNameWithoutExtension(filePath);
                 sgs.ob_file = ob;
-                draft.mapContentHash = HashUtil.StableHash16(File.ReadAllText(mapKey));
+                var fileHash = HashUtil.StableHash16(File.ReadAllText(filePath));
+                if (!string.IsNullOrEmpty(draft.mapContentHash) &&
+                    !string.Equals(draft.mapContentHash, fileHash, StringComparison.OrdinalIgnoreCase))
+                    log.LogWarning("[Bootstrap] mapContentHash mismatch draft=" + draft.mapContentHash + " local=" + fileHash);
+                draft.mapContentHash = fileHash;
+                // Keep user: id in draft — do not rewrite to absolute path.
             }
             else
             {
                 log.LogError("[Bootstrap] Map not found as Resources or file: " + mapKey);
-                log.LogError("[Bootstrap] Tip: use SD map name or Resources path like Skirmish/<name>");
+                log.LogError("[Bootstrap] Tip: SD name, Skirmish/<name>, or user:<rel>.map under UserMaps");
                 return null;
             }
 

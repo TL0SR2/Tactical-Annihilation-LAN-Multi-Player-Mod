@@ -2,7 +2,7 @@
 
 遭遇战局域网联机插件源码（设计见 `../docs/lan-mp/`）。
 
-当前版本：**0.19.2**（唯一源：`LanMpVersion.Current` / `src/AnnW.LanMp.Protocol/LanMpVersion.cs`）。
+当前版本：**0.19.3**（唯一源：`LanMpVersion.Current` / `src/AnnW.LanMp.Protocol/LanMpVersion.cs`）。
 
 升版：只改 `LanMpVersion.Current`，或执行  
 `powershell -File LanMp\tools\Sync-Version.ps1 -Version x.y.z`（会同步本 README）。  
@@ -61,6 +61,14 @@ dotnet build "LanMp\src\AnnW.LanMp\AnnW.LanMp.csproj" -c Release
 Join 连到面板填写的地址（默认 `127.0.0.1:24555`），无公共匹配服。
 
 配置：`BepInEx\config\annw.lanmp.cfg`
+
+### 自制地图（UserMaps）
+
+联机房间与游戏遭遇战共用同一自制图目录（非游戏安装目录）：
+
+`Documents\My Games\Tactical Annihilation\<SteamId 或 Default>\UserMaps\`
+
+若游戏选项启用了自定义本地数据路径，则为 `<自定义根目录>\UserMaps\`。分发包内 `INSTALL.txt` 有完整说明。
 
 ## 自动化烟测（不需要双开游戏）
 

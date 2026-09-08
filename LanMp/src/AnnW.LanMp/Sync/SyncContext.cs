@@ -9,6 +9,12 @@ namespace AnnW.LanMp.Sync
         public static bool SuppressNetworkEmit { get; set; }
         public static bool ApplyingRemoteCommand { get; set; }
 
+        /// <summary>
+        /// True only while <see cref="CommandApplyQueue"/> is inside <c>MoveNext</c> of an apply body.
+        /// Guest UX clicks happen between yields (flag false) and must not ride Suppress/Applying.
+        /// </summary>
+        public static bool InApplyEnumerator { get; set; }
+
         /// <summary>When set, next GameAPI.CreateUnit remaps to this id (then cleared).</summary>
         public static int? ForcedUnitId { get; set; }
 

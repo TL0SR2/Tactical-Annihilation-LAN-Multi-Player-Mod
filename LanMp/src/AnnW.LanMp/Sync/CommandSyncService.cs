@@ -1273,12 +1273,17 @@ namespace AnnW.LanMp.Sync
             // INV: Host Accept is local sim (Suppress only for emit) — still need presentation stamps
             // before ExecuteAction so Guest SHIELD_GEN / ATTACK are not fast-skipped on Host
             // (moveDuration was 0 until HostBroadcastCommand).
+            // INV-T10: SafePump — Host Accept also runs on CoroutineObject; raw nested animators hang.
             SyncContext.SuppressNetworkEmit = true;
             SyncContext.ApplyingRemoteCommand = true;
             try
             {
                 StampPresentationHints(cmd);
-                yield return CoApplyCommandBody(cmd);
+                yield return AnnWCoroutine.SafePump(
+                    CoApplyCommandBody(cmd),
+                    AnnWCoroutine.DefaultApplyTimeoutSec,
+                    _log,
+                    "HostAccept:" + (cmd.kind ?? "?"));
                 if (cmd.kind != "EndTurn")
                     HostBroadcastCommand(cmd);
             }
@@ -1286,6 +1291,7 @@ namespace AnnW.LanMp.Sync
             {
                 SyncContext.SuppressNetworkEmit = false;
                 SyncContext.ApplyingRemoteCommand = false;
+                SyncContext.InApplyEnumerator = false;
             }
         }
 
@@ -1550,60 +1556,69 @@ namespace AnnW.LanMp.Sync
 
         private IEnumerator CoApplyQueuedCommand(CommandDto cmd)
         {
-            // Flags already set by CommandApplyQueue.
-            if (cmd.kind != "EndTurn")
-                BattleSyncTrace.EvCommand("CmdApply", cmd);
-
-            if (cmd.kind == "EndTurn")
+            // Flags already set by CommandApplyQueue; body is SafePump'd at the queue boundary
+            // (INV-T10) — may yield nested IEnumerator / null from vanilla animators freely.
+            try
             {
-                // LifeTime skill summons expire on Host UnitData.EndTurn → Die → absent from
-                // CaptureBoard. Present death then remove (same pattern as CastSkill orphans).
-                yield return CoApplyGuestEndTurn(cmd);
-                yield break;
-            }
+                if (cmd.kind != "EndTurn")
+                    BattleSyncTrace.EvCommand("CmdApply", cmd);
 
-            if (NeedsAnimatedApply(cmd.kind))
-            {
-                yield return CoApplyCommandBody(cmd);
+                if (cmd.kind == "EndTurn")
+                {
+                    // LifeTime skill summons expire on Host UnitData.EndTurn → Die → absent from
+                    // CaptureBoard. Present death then remove (same pattern as CastSkill orphans).
+                    yield return CoApplyGuestEndTurn(cmd);
+                    yield break;
+                }
+
+                if (NeedsAnimatedApply(cmd.kind))
+                {
+                    yield return CoApplyCommandBody(cmd);
+                    try
+                    {
+                        var attach = ResultAttachmentCodec.FromJson(cmd.resultAttachmentJson);
+                        if (ResultAttachmentCodec.HasPayload(attach) &&
+                            cmd.kind != "DoAction" && cmd.kind != "CastSkill")
+                        {
+                            // DoAction / CastSkill apply inside their attach-only coroutines.
+                        }
+                        if (ResultAttachmentCodec.HasPayload(attach) && cmd.kind == "UnitMoved")
+                            ApplyResultAttachment(attach, cmd.kind, snapPositions: false);
+                        else if (ResultAttachmentCodec.HasPayload(attach) && cmd.kind == "DoAction")
+                        {
+                            var cate = (ActionCate)cmd.actionCate;
+                            if (cate != ActionCate.BUILD && cate != ActionCate.TRAIN &&
+                                cate != ActionCate.QUICK_BUILD_MINER)
+                                ApplyResultAttachment(attach, cmd.kind, snapPositions: false);
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        _log.LogWarning("[Sync] queue post-attach: " + ex.Message);
+                    }
+                    yield break;
+                }
+
+                ApplyCommandBodyInstant(cmd);
                 try
                 {
                     var attach = ResultAttachmentCodec.FromJson(cmd.resultAttachmentJson);
-                    if (ResultAttachmentCodec.HasPayload(attach) &&
-                        cmd.kind != "DoAction" && cmd.kind != "CastSkill")
+                    if (ResultAttachmentCodec.HasPayload(attach))
                     {
-                        // DoAction / CastSkill apply inside their attach-only coroutines.
-                    }
-                    if (ResultAttachmentCodec.HasPayload(attach) && cmd.kind == "UnitMoved")
-                        ApplyResultAttachment(attach, cmd.kind, snapPositions: false);
-                    else if (ResultAttachmentCodec.HasPayload(attach) && cmd.kind == "DoAction")
-                    {
-                        var cate = (ActionCate)cmd.actionCate;
-                        if (cate != ActionCate.BUILD && cate != ActionCate.TRAIN &&
-                            cate != ActionCate.QUICK_BUILD_MINER)
-                            ApplyResultAttachment(attach, cmd.kind, snapPositions: false);
+                        ApplyResultAttachment(attach, cmd.kind, snapPositions: true);
+                        if (cmd.kind == "Undo")
+                            ActionPresentation.AfterAttachApply(attach, _log, cmd, null);
                     }
                 }
                 catch (Exception ex)
                 {
-                    _log.LogWarning("[Sync] queue post-attach: " + ex.Message);
-                }
-                yield break;
-            }
-
-            ApplyCommandBodyInstant(cmd);
-            try
-            {
-                var attach = ResultAttachmentCodec.FromJson(cmd.resultAttachmentJson);
-                if (ResultAttachmentCodec.HasPayload(attach))
-                {
-                    ApplyResultAttachment(attach, cmd.kind, snapPositions: true);
-                    if (cmd.kind == "Undo")
-                        ActionPresentation.AfterAttachApply(attach, _log, cmd, null);
+                    _log.LogWarning("[Sync] queue instant attach: " + ex.Message);
                 }
             }
-            catch (Exception ex)
+            finally
             {
-                _log.LogWarning("[Sync] queue instant attach: " + ex.Message);
+                // Release Guest in-flight only after this Command's apply finished (or failed).
+                NoteGuestCommandResolved(cmd);
             }
         }
 
@@ -1742,29 +1757,14 @@ namespace AnnW.LanMp.Sync
             SyncContext.SuppressNetworkEmit = true;
             SyncContext.ApplyingRemoteCommand = true;
             Exception error = null;
-            var apply = CoApplyCommandBody(cmd);
-            while (true)
+            try
             {
-                object current = null;
-                bool moved;
-                try
-                {
-                    moved = apply.MoveNext();
-                    if (moved)
-                        current = apply.Current;
-                }
-                catch (Exception ex)
-                {
-                    error = ex;
-                    break;
-                }
-                if (!moved)
-                    break;
-                yield return current;
-            }
+                yield return AnnWCoroutine.SafePump(
+                    CoApplyCommandBody(cmd),
+                    AnnWCoroutine.DefaultApplyTimeoutSec,
+                    _log,
+                    "Local:" + (cmd.kind ?? "?"));
 
-            if (error == null)
-            {
                 try
                 {
                     var attach = ResultAttachmentCodec.FromJson(cmd.resultAttachmentJson);
@@ -1776,9 +1776,12 @@ namespace AnnW.LanMp.Sync
                     error = ex;
                 }
             }
-
-            SyncContext.SuppressNetworkEmit = false;
-            SyncContext.ApplyingRemoteCommand = false;
+            finally
+            {
+                SyncContext.SuppressNetworkEmit = false;
+                SyncContext.ApplyingRemoteCommand = false;
+                SyncContext.InApplyEnumerator = false;
+            }
 
             if (error != null)
                 _log.LogError("[Sync] CoApplyCommandLocally: " + error);
@@ -2035,7 +2038,8 @@ namespace AnnW.LanMp.Sync
             }
 
             var idsBefore = ActionPresentation.SnapshotAliveIds();
-            ActionPresentation.KickSkillCastCue(_log);
+            // Cast-process VFX (DoActionAni + banner) before attach — M07 B7 / ADR-003 R4.
+            yield return ActionPresentation.CoKickSkillCastVisual(cmd, _log);
 
             try { ResultAttachmentBridge.PreSpawnMissing(attach, _log); }
             catch (Exception ex)
@@ -2560,7 +2564,8 @@ namespace AnnW.LanMp.Sync
                 BattleSyncTrace.EvCommand("CmdRecv", cmd);
                 _log.LogInfo($"[Sync] Command received kind={cmd.kind}");
                 NoteGuestUndoAvailable(cmd.undoAvailable);
-                NoteGuestCommandResolved(cmd);
+                // Await clears AFTER ApplyQueue finishes this Command (see CoApplyQueuedCommand).
+                // Clearing on recv allowed a second CastSkill before energy attach (Host L1638).
                 ApplyCommandLocally(cmd);
             }
         }

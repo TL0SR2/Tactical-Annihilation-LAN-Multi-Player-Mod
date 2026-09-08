@@ -187,6 +187,28 @@ namespace AnnW.LanMp.Ui
                 UiFeedback.Push(msg);
                 if (IsOpen) RefreshSeatsFromDraft();
             };
+            plugin.Lobby.OnMapSynced += () =>
+            {
+                ReloadMaps();
+                if (!IsOpen) return;
+                ApplyDraftToUi(plugin.Lobby.Draft);
+                RefreshAll();
+                UiFeedback.Push("已同步房主自制地图");
+            };
+            plugin.Lobby.OnMapTransferFailed += n =>
+            {
+                if (n == null) return;
+                var msg = string.IsNullOrEmpty(n.message)
+                    ? "自制地图无法自动同步，请自行放入 UserMaps 后再准备"
+                    : n.message;
+                UiFeedback.Push(msg, 12f);
+                if (IsOpen)
+                {
+                    RefreshStatusAndRoster();
+                    RefreshActionButtons();
+                    RefreshMapInfo();
+                }
+            };
             // LobbyReject toast: only Plugin.Awake (avoid double toast).
             _hooks = true;
         }
@@ -645,7 +667,7 @@ namespace AnnW.LanMp.Ui
 
         private static void ReloadMaps()
         {
-            _maps = LanRoomMapCatalog.ListBuiltin(LanMpPlugin.Log);
+            _maps = LanRoomMapCatalog.ListForRoom(LanMpPlugin.Log);
             RebuildMapButtons();
         }
 
@@ -662,6 +684,19 @@ namespace AnnW.LanMp.Ui
             foreach (var map in _maps)
             {
                 var captured = map;
+                if (map.IsSection)
+                {
+                    var hdr = AnnwUiKit.CreateMapListButton(
+                        _view.mapListContent, "MapHdr_" + map.Id, map.ListLabel ?? map.DisplayName, () => { });
+                    hdr.interactable = false;
+                    var hdrImg = hdr.targetGraphic as Image;
+                    if (hdrImg != null)
+                        hdrImg.color = new Color(0.22f, 0.2f, 0.18f, 1f);
+                    _mapButtons.Add(hdr);
+                    _mapLabels.Add(hdr.GetComponentInChildren<TextMeshProUGUI>());
+                    continue;
+                }
+
                 var btn = AnnwUiKit.CreateMapListButton(_view.mapListContent, "Map_" + map.Id, map.ListLabel ?? map.DisplayName, () =>
                 {
                     if (!IsHost() || _applyingRemote)
@@ -676,6 +711,8 @@ namespace AnnW.LanMp.Ui
 
         private static void SelectMap(LanRoomMapCatalog.Entry map)
         {
+            if (map == null || map.IsSection)
+                return;
             _selectedMapId = map.Id;
             HighlightSelectedMap();
 
@@ -796,19 +833,21 @@ namespace AnnW.LanMp.Ui
             if (!string.IsNullOrEmpty(draft.mapDisplayName) || !string.IsNullOrEmpty(draft.mapId))
             {
                 var match = _maps.Find(m =>
+                    !m.IsSection && (
                     m.DisplayName == draft.mapDisplayName ||
                     m.Id == draft.mapDisplayName ||
                     m.Id == draft.mapId ||
-                    (draft.mapId != null && (draft.mapId.EndsWith("/" + m.Id) || draft.mapId == m.ResourcesPath)));
-                _selectedMapId = match != null ? match.Id : draft.mapDisplayName;
+                    (draft.mapId != null && (draft.mapId.EndsWith("/" + m.Id) || draft.mapId == m.ResourcesPath))));
+                // Guest may lack the homemade file — still show draft id so status can explain.
+                _selectedMapId = match != null ? match.Id : draft.mapId;
             }
             else
                 _selectedMapId = null;
 
             HighlightSelectedMap();
             SetRuleButtonsInteractable(false);
-            foreach (var b in _mapButtons)
-                b.interactable = false;
+            for (var i = 0; i < _mapButtons.Count; i++)
+                _mapButtons[i].interactable = false;
         }
 
         private static void ApplyLocalNamesToDraftIfHost()
@@ -835,8 +874,13 @@ namespace AnnW.LanMp.Ui
             HighlightSelectedMap();
             var host = IsHost();
             SetRuleButtonsInteractable(host);
-            foreach (var b in _mapButtons)
-                b.interactable = host;
+            for (var i = 0; i < _mapButtons.Count; i++)
+            {
+                if (i < _maps.Count && _maps[i].IsSection)
+                    _mapButtons[i].interactable = false;
+                else
+                    _mapButtons[i].interactable = host;
+            }
         }
 
         private static void RefreshMapInfo()
@@ -846,7 +890,8 @@ namespace AnnW.LanMp.Ui
             if (!string.IsNullOrEmpty(_selectedMapId))
                 entry = FindMap(_selectedMapId);
             else if (draft != null && !string.IsNullOrEmpty(draft.mapDisplayName))
-                entry = _maps.Find(m => m.DisplayName == draft.mapDisplayName || m.Id == draft.mapId);
+                entry = _maps.Find(m =>
+                    !m.IsSection && (m.DisplayName == draft.mapDisplayName || m.Id == draft.mapId));
 
             if (entry != null)
             {
@@ -870,9 +915,20 @@ namespace AnnW.LanMp.Ui
             else
             {
                 if (_mapTitle != null)
-                    _mapTitle.text = IsHost() ? "请选择地图" : "等待房主选择地图";
+                {
+                    if (!IsHost() && draft != null && LanRoomMapCatalog.IsUserMapId(draft.mapId))
+                        _mapTitle.text = draft.mapDisplayName ?? draft.mapId;
+                    else
+                        _mapTitle.text = IsHost() ? "请选择地图" : "等待房主选择地图";
+                }
                 if (_mapDes != null)
-                    _mapDes.text = "选图后显示尺寸与主题；配置自动同步";
+                {
+                    if (!IsHost() && draft != null && LanRoomMapCatalog.IsUserMapId(draft.mapId) &&
+                        !LanRoomMapCatalog.TryValidateLocalMap(draft, out var mapErr))
+                        _mapDes.text = mapErr;
+                    else
+                        _mapDes.text = "选图后显示尺寸与主题；配置自动同步";
+                }
                 LanRoomMinimap.Clear();
             }
         }
@@ -1014,6 +1070,19 @@ namespace AnnW.LanMp.Ui
             }
             if (string.IsNullOrEmpty(draft?.mapId))
                 return net.Role == PeerRole.Host ? "状态：请选择地图" : "状态：等待房主选择地图";
+            if (!LanRoomMapCatalog.TryValidateLocalMap(draft, out var mapErr))
+            {
+                if (LanRoomMapCatalog.IsUserMapId(draft.mapId) && net.Role == PeerRole.Guest)
+                {
+                    var nack = lobby.LastMapTransferNack;
+                    if (nack != null && !string.IsNullOrEmpty(nack.message) &&
+                        (string.IsNullOrEmpty(nack.mapId) ||
+                         string.Equals(nack.mapId, draft.mapId, StringComparison.OrdinalIgnoreCase)))
+                        return "状态：" + nack.message;
+                    return "状态：正在向房主同步自制地图…（" + mapErr + "）";
+                }
+                return "状态：" + mapErr;
+            }
             if (net.Role == PeerRole.Guest && !net.IsConnected)
                 return "状态：正在加入…";
             if (lobby.CanStart)
@@ -1036,8 +1105,10 @@ namespace AnnW.LanMp.Ui
             var net = plugin.Net;
             var seated = LobbySeatLogic.FindSeatIndexByPeer(lobby.Draft, net.LocalPeerId) >= 0
                          || (net.Role == PeerRole.Host && !string.IsNullOrEmpty(lobby.Draft?.mapId));
+            var mapOk = LanRoomMapCatalog.TryValidateLocalMap(lobby.Draft, out _);
             var canReady = net.Role != PeerRole.None
                            && !string.IsNullOrEmpty(lobby.Draft?.mapId)
+                           && mapOk
                            && seated
                            && (net.Role == PeerRole.Host || net.IsConnected);
             if (_view.btnReady != null)
@@ -1056,6 +1127,8 @@ namespace AnnW.LanMp.Ui
         {
             for (var i = 0; i < _maps.Count && i < _mapButtons.Count; i++)
             {
+                if (_maps[i].IsSection)
+                    continue;
                 var img = _mapButtons[i].targetGraphic as Image;
                 if (img == null)
                     continue;
@@ -1077,6 +1150,13 @@ namespace AnnW.LanMp.Ui
         {
             var plugin = LanMpPlugin.Instance;
             if (plugin == null) return;
+            if (!plugin.Lobby.LocalReady &&
+                !LanRoomMapCatalog.TryValidateLocalMap(plugin.Lobby.Draft, out var mapErr))
+            {
+                if (_view?.statusLine != null)
+                    _view.statusLine.text = "状态：" + mapErr;
+                return;
+            }
             plugin.Lobby.SetLocalReady(!plugin.Lobby.LocalReady);
             RefreshActionButtons();
             RefreshStatusAndRoster();
@@ -1142,7 +1222,10 @@ namespace AnnW.LanMp.Ui
         private static LanRoomMapCatalog.Entry FindMap(string id)
         {
             if (string.IsNullOrEmpty(id)) return null;
-            return _maps.Find(m => m.Id == id || m.DisplayName == id || m.ResourcesPath == id);
+            return _maps.Find(m =>
+                !m.IsSection &&
+                (m.Id == id || m.DisplayName == id || m.ResourcesPath == id ||
+                 (m.IsUser && LanRoomMapCatalog.IsUserMapId(id) && m.Id.Equals(id, StringComparison.OrdinalIgnoreCase))));
         }
 
         private static void DestroyNamed(Transform parent, string name)

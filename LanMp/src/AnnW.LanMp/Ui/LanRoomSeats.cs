@@ -94,8 +94,12 @@ namespace AnnW.LanMp.Ui
                     LanSeatCell.AddCoButton(row, ColCo, CoLabel(seat), prefEditable, () =>
                     {
                         if (!prefEditable) return;
-                        OpenCoSelect((coId, skillId, psIds) =>
+                        // Capture seat snapshot — Rebuild may destroy row before confirm returns.
+                        var seatSnap = seat;
+                        OpenCoSelect(seatSnap, (coId, skillId, psIds) =>
                         {
+                            LanMpPlugin.Log?.LogInfo(
+                                $"[RoomUI] CO pick seat={idx} co={coId} skill={skillId} ps={(psIds == null ? 0 : psIds.Length)}");
                             LanMpPlugin.Instance?.Lobby.RequestSeatEdit(new SeatEditRequest
                             {
                                 seatIndex = idx,
@@ -323,42 +327,50 @@ namespace AnnW.LanMp.Ui
 
         /// <summary>
         /// Pick CO + skill/PS without mutating Lobby.Draft (Guest must not write authority draft).
-        /// UI_CO_SelectResult.skill / list_ps must be forwarded (Zero + free-slot).
+        /// Reads CUSTOM temp_* from the panel (ADR-005) so seat loadout matches what the player confirmed.
         /// </summary>
-        private static void OpenCoSelect(Action<string, string, string[]> onPicked)
+        private static void OpenCoSelect(LobbySeatDto seat, Action<string, string, string[]> onPicked)
         {
             try
             {
                 var floater = UI_Floater.self;
                 if (floater == null || floater.co_select == null)
                 {
-                    onPicked?.Invoke(NextCoFallback(null), "", new string[0]);
+                    onPicked?.Invoke(NextCoFallback(seat?.coId), "", new string[0]);
                     return;
                 }
 
                 LanDropMenu.CloseOpen();
                 LanDropMenu.BringFloaterPopupToFront(floater.co_select);
+                Patches.CoSelectUiPatches.BeginSeatLoadoutSeed(seat);
                 floater.co_select.ShowForSkirmish(result =>
                 {
-                    var item = result.co_item;
-                    string id;
-                    if (item.sd_co == null)
-                        id = item.is_random ? "" : "__none__";
-                    else
-                        id = item.sd_co.name;
-
-                    var skillId = "";
                     try
                     {
-                        if (result.skill != null && !string.IsNullOrEmpty(result.skill.name))
+                        var item = result != null ? result.co_item : default;
+                        // Prefer live selection on the panel (result.co_item can lag if SetSelection-only).
+                        try
+                        {
+                            item = floater.co_select.cur_selection;
+                        }
+                        catch { /* keep result.co_item */ }
+
+                        string id;
+                        if (item.sd_co == null)
+                            id = item.is_random ? "" : "__none__";
+                        else
+                            id = item.sd_co.name;
+
+                        // Temps are the UI source of truth under for_skirmish / CUSTOM.
+                        Patches.CoSelectUiPatches.ReadSkirmishLoadoutFromUi(
+                            floater.co_select, out var skillId, out var psIds);
+
+                        // Fallback to Populate result if temps were empty (random / none).
+                        if (string.IsNullOrEmpty(skillId) && result?.skill != null &&
+                            !string.IsNullOrEmpty(result.skill.name))
                             skillId = result.skill.name;
-                    }
-                    catch { /* ignore */ }
-
-                    string[] psIds = new string[0];
-                    try
-                    {
-                        if (result.list_ps != null && result.list_ps.Count > 0)
+                        if ((psIds == null || psIds.Length == 0) && result?.list_ps != null &&
+                            result.list_ps.Count > 0)
                         {
                             var list = new List<string>();
                             foreach (var ps in result.list_ps)
@@ -368,17 +380,23 @@ namespace AnnW.LanMp.Ui
                             }
                             psIds = list.ToArray();
                         }
-                    }
-                    catch { /* ignore */ }
 
-                    onPicked?.Invoke(id, skillId, psIds);
+                        onPicked?.Invoke(id, skillId ?? "", psIds ?? new string[0]);
+                    }
+                    finally
+                    {
+                        Patches.CoSelectUiPatches.ClearSeatLoadoutSeed();
+                    }
                 });
+                // Match vanilla OnBtnCO_Sel: select current seat CO so info/temps render immediately.
+                Patches.CoSelectUiPatches.ApplySkirmishSelection(floater.co_select, seat);
                 LanDropMenu.BringFloaterPopupToFront(floater.co_select);
             }
             catch (Exception ex)
             {
+                Patches.CoSelectUiPatches.ClearSeatLoadoutSeed();
                 LanMpPlugin.Log?.LogWarning("[RoomUI] CO select failed: " + ex.Message);
-                onPicked?.Invoke(NextCoFallback(null), "", new string[0]);
+                onPicked?.Invoke(NextCoFallback(seat?.coId), "", new string[0]);
             }
         }
 

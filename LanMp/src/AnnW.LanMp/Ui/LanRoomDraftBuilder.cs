@@ -7,6 +7,7 @@ namespace AnnW.LanMp.Ui
     /// <summary>Builds LobbyDraftDto seats from map data (AllPlayer preview semantics).</summary>
     internal static class LanRoomDraftBuilder
     {
+        /// <summary>Build draft seats from official or UserMaps entry.</summary>
         public static bool TryBuildFromBuiltin(
             LanRoomMapCatalog.Entry map,
             int fow,
@@ -21,7 +22,7 @@ namespace AnnW.LanMp.Ui
         {
             draft = null;
             error = null;
-            if (map == null)
+            if (map == null || map.IsSection)
             {
                 error = "未选择地图";
                 return false;
@@ -108,9 +109,14 @@ namespace AnnW.LanMp.Ui
                 }
             }
 
+            // Homemade: stable user:relative id (never Host absolute path). Builtin: Resources key.
+            var draftMapId = map.IsUser || LanRoomMapCatalog.IsUserMapId(map.Id)
+                ? map.Id
+                : mapKey;
+
             draft = new LobbyDraftDto
             {
-                mapId = mapKey,
+                mapId = draftMapId,
                 mapDisplayName = map.DisplayName,
                 mapContentHash = LanRoomMapCatalog.HashOf(text),
                 fowType = fow,
