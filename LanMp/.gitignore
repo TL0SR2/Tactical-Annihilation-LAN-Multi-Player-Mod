@@ -37,3 +37,7 @@ LanMp.ForceNoSteam
 tools/AnnW.TestUnlockPS/
 tools/AnnW.TestUnlockCOs/
 tools/_tmp_*/
+tools/_audit_*/
+tools/_probe_*/
+tools/_probe_*.cs
+tools/_reflect_*/
