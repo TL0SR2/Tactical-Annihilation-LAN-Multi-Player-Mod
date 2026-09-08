@@ -169,6 +169,8 @@ namespace AnnW.LanMp.Presentation
                 PresentationContext.ControlGrantPending = false;
                 _grantRunning = false;
                 LanMpPlugin.Instance?.Authority?.ApplyLocalViewBinding("control-grant");
+                RefreshLocalVision(log);
+                ViewUtil.InvalidateLocalCombatUxCaches(log);
                 try { UX_Manager.self?.CheckUnitsAndSetUXState(); }
                 catch { /* ignore */ }
             }

@@ -18,14 +18,136 @@ namespace AnnW.LanMp.Patches
         private static readonly MethodInfo GetUxViewFraction =
             AccessTools.Method(typeof(ViewUtil), nameof(ViewUtil.GetUxViewFraction));
 
+        private static readonly MethodInfo GetActionUxFowFraction =
+            AccessTools.Method(typeof(ViewUtil), nameof(ViewUtil.GetActionUxFowFraction));
+
         private static readonly MethodInfo GetMoveZoneFowFraction =
             AccessTools.Method(typeof(ViewUtil), nameof(ViewUtil.GetMoveZoneFowFraction));
 
         private static readonly MethodInfo GetFraction =
             AccessTools.Property(typeof(UnitData), nameof(UnitData.fraction))?.GetGetMethod();
 
+        private static readonly FieldInfo ActionPlayerField =
+            AccessTools.Field(typeof(ActionData), nameof(ActionData.player));
+
         private static readonly FieldInfo BattleSelfField =
             AccessTools.Field(typeof(GS_Battle), "self");
+
+        /// <summary>
+        /// Replace <c>action.player.fraction → AcquireFOWMap</c> with INV-VIEW
+        /// <see cref="ViewUtil.GetActionUxFowFraction"/> (BUILD ghost / AOE / CanDoAction UX).
+        /// </summary>
+        private static List<CodeInstruction> RewriteActionPlayerFow(List<CodeInstruction> codes)
+        {
+            if (ActionPlayerField == null || FractionField == null || GetActionUxFowFraction == null ||
+                BattleSelfField == null)
+                return codes;
+
+            for (var i = 0; i < codes.Count - 2; i++)
+            {
+                // ldarg.0 ; ldfld player ; ldfld fraction ; callvirt AcquireFOWMap
+                if (codes[i].opcode != OpCodes.Ldarg_0 &&
+                    !(codes[i].opcode == OpCodes.Ldarg && Equals(codes[i].operand, 0)) &&
+                    !(codes[i].opcode == OpCodes.Ldarg_S && codes[i].operand?.ToString() == "0"))
+                    continue;
+                if (i + 3 >= codes.Count)
+                    continue;
+                if (codes[i + 1].opcode != OpCodes.Ldfld || !codes[i + 1].OperandIs(ActionPlayerField))
+                    continue;
+                if (codes[i + 2].opcode != OpCodes.Ldfld || !codes[i + 2].OperandIs(FractionField))
+                    continue;
+                if (codes[i + 3].opcode != OpCodes.Callvirt ||
+                    !(codes[i + 3].operand is MethodInfo mi) ||
+                    mi.Name != "AcquireFOWMap")
+                    continue;
+
+                // Keep ldarg.0 (action); replace player+fraction with battle + helper.
+                codes[i + 1] = new CodeInstruction(OpCodes.Ldsfld, BattleSelfField);
+                codes[i + 2] = new CodeInstruction(OpCodes.Call, GetActionUxFowFraction);
+                // AcquireFOWMap stays at i+3
+            }
+            return codes;
+        }
+
+        [HarmonyPatch(typeof(ActionData), nameof(ActionData.CanDoAction))]
+        private static class Patch_CanDoAction_Fow
+        {
+            private static IEnumerable<CodeInstruction> Transpiler(IEnumerable<CodeInstruction> instructions) =>
+                RewriteActionPlayerFow(new List<CodeInstruction>(instructions));
+
+            private static void Postfix(ActionData __instance, ref REASON_CANTDO __result)
+            {
+                if (__result != REASON_CANTDO.TARGET_NOT_VISIBLE)
+                    return;
+                if (!ViewUtil.ShouldSoftPassTargetNotVisible(__instance))
+                    return;
+                __result = REASON_CANTDO.OK;
+            }
+        }
+
+        // GetEffectZone / CheckAttackAnyone / OnMapUnitChange are non-public — patch by name string.
+        [HarmonyPatch(typeof(ActionData), "GetEffectZone")]
+        private static class Patch_GetEffectZone_Fow
+        {
+            private static IEnumerable<CodeInstruction> Transpiler(IEnumerable<CodeInstruction> instructions) =>
+                RewriteActionPlayerFow(new List<CodeInstruction>(instructions));
+        }
+
+        [HarmonyPatch(typeof(UnitData), "CheckAttackAnyone")]
+        private static class Patch_CheckAttackAnyone_Fow
+        {
+            private static IEnumerable<CodeInstruction> Transpiler(IEnumerable<CodeInstruction> instructions)
+            {
+                var codes = new List<CodeInstruction>(instructions);
+                if (GetFraction == null || BattleSelfField == null || GetMoveZoneFowFraction == null)
+                    return codes;
+
+                for (var i = 0; i < codes.Count; i++)
+                {
+                    if (codes[i].opcode != OpCodes.Callvirt ||
+                        !(codes[i].operand is MethodInfo mi) ||
+                        mi.Name != "AcquireFOWMap")
+                        continue;
+                    if (i < 2)
+                        continue;
+                    // ... get_fraction(unit) → AcquireFOWMap  ⇒  unit, battle → GetMoveZoneFowFraction
+                    if (codes[i - 1].opcode != OpCodes.Call || !codes[i - 1].OperandIs(GetFraction))
+                        continue;
+                    if (codes[i - 2].opcode != OpCodes.Ldarg_0 && codes[i - 2].opcode != OpCodes.Ldarg &&
+                        !(codes[i - 2].opcode == OpCodes.Ldarg_S && codes[i - 2].operand?.ToString() == "0"))
+                        continue;
+
+                    codes[i - 1] = new CodeInstruction(OpCodes.Ldsfld, BattleSelfField);
+                    codes.Insert(i, new CodeInstruction(OpCodes.Call, GetMoveZoneFowFraction));
+                    i++;
+                }
+                return codes;
+            }
+        }
+
+        /// <summary>
+        /// Vanilla clears can_attack_anyone only when unit.player == cur_player.
+        /// Guest skips StartTurn while spectating — keep local-faction caches fresh (turret dots).
+        /// </summary>
+        [HarmonyPatch(typeof(UnitData), "OnMapUnitChange")]
+        private static class Patch_OnMapUnitChange_AttackCache
+        {
+            private static void Postfix(UnitData __instance)
+            {
+                if (__instance?.player == null)
+                    return;
+                if (!GateUtil.LanArmed(out var plugin))
+                    return;
+                var local = plugin.Authority.TryGetLocalHumanPlayer();
+                if (local == null)
+                    return;
+                if (__instance.player.fraction != local.fraction)
+                    return;
+                // Already cleared by vanilla when player==cur_player; still OK to null again.
+                try { UnitDataAccess.ClearCanAttackAnyone(__instance); }
+                catch { /* ignore */ }
+            }
+        }
 
         [HarmonyPatch(typeof(UnitData), "GetMoveZone")]
         private static class Patch_GetMoveZone_Fow

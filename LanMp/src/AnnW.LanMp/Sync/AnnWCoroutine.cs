@@ -80,6 +80,7 @@ namespace AnnW.LanMp.Sync
 
                 if (cur is float f)
                 {
+                    // Vanilla CoroutineObject: any float yield returns to Update — including 0.
                     if (f <= 0f)
                     {
                         yield return NextTick;
@@ -98,6 +99,16 @@ namespace AnnW.LanMp.Sync
 
                 if (cur is int ii)
                 {
+                    // Vanilla move/attack animators yield boxed int 0 each lerp frame
+                    // (UnitData.proc_MoveAnimation, DoAction_*). Treating 0 as "wait 0s"
+                    // without yielding busy-completes the whole path in one ApplyQueue
+                    // MoveNext → Guest teleport / missing attack VFX (INV-T10 regression).
+                    if (ii <= 0)
+                    {
+                        yield return NextTick;
+                        continue;
+                    }
+
                     var waited = 0f;
                     var limit = (float)ii;
                     while (waited < limit && guard < timeoutSec)

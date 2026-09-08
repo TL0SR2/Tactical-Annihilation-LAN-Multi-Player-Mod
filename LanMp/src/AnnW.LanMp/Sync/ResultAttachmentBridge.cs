@@ -373,14 +373,25 @@ namespace AnnW.LanMp.Sync
 
                         ApplyBuildingState(unit, us, log);
 
+                        var spentDirty = unit.actioned != us.actioned || unit.moved != us.moved;
                         unit.actioned = us.actioned;
                         unit.moved = us.moved;
                         // Host OnUnitActionEnd / StartTurn own cd; Guest attach-only never runs those.
                         var cdDirty = unit.cd != us.cd || unit.cding != us.cding;
                         unit.cd = us.cd;
                         unit.cding = us.cding;
-                        if (cdDirty)
+                        if (spentDirty || cdDirty)
+                        {
+                            // Guest skips UnitData.StartTurn — stale can_attack_anyone hides turret dots;
+                            // move/action flags also need FUI ReDraw (not only cd).
+                            try { AnnW.LanMp.Patches.UnitDataAccess.ClearCanAttackAnyone(unit); }
+                            catch { /* ignore */ }
+                            try { unit.eq?.ClearMoveOpCache(); }
+                            catch { /* ignore */ }
+                            try { unit.build_planner?.Invalidate(); }
+                            catch { /* ignore */ }
                             TryReDrawUnit(unit);
+                        }
 
                         if (us.hasTrainPos)
                         {
@@ -403,8 +414,10 @@ namespace AnnW.LanMp.Sync
                         }
 
                         ApplyShieldState(unit, us, log);
-                        ApplyRankExpState(unit, us, log);
+                        // Rank AFTER effect_host rebind: ClearEffectHostSilent drops effect_rank
+                        // that RefreshAfterLevelUp just attached — Guest then shows no rank badge.
                         ApplyEffectHostJson(unit.effect_host, us.effectObJson, "unit", us.unitId, log);
+                        ApplyRankExpState(unit, us, log);
 
                         try { unit.Event_UpdatePos?.Invoke(); }
                         catch { /* ignore */ }
@@ -1086,6 +1099,7 @@ namespace AnnW.LanMp.Sync
         /// <summary>
         /// Sync RankExp: unit_rank + exp progress + exp_req (Guest previously only got rank).
         /// unitExp/unitExpReq &lt; 0 = legacy omit.
+        /// Must run AFTER <see cref="ApplyEffectHostJson"/> — silent effect clear strips RANK_* visuals.
         /// </summary>
         private static void ApplyRankExpState(UnitData unit, UnitSnapDto us, ManualLogSource log)
         {
@@ -1101,7 +1115,12 @@ namespace AnnW.LanMp.Sync
             {
                 var rl = unit.GetRankLogic();
                 if (rl == null)
-                    return;
+                {
+                    AnnW.LanMp.Patches.UnitDataAccess.EnsureRankLogic(unit);
+                    rl = unit.GetRankLogic();
+                    if (rl == null)
+                        return;
+                }
 
                 var rankDirty = rl.unit_rank != us.unitRank;
                 var prevExp = rl.exp;
@@ -1119,11 +1138,17 @@ namespace AnnW.LanMp.Sync
                 var expDirty = Math.Abs(prevExp - rl.exp) > 0.001f ||
                                Math.Abs(prevReq - rl.exp_req) > 0.001f;
 
-                if (rankDirty)
+                // Rank badge is UnitEffect (effect_rank). Even when unit_rank number already
+                // matched, effect_host rebind leaves the badge missing — always rebuild when ranked.
+                var rankFxMissing = us.unitRank > 0 &&
+                                    AnnW.LanMp.Patches.UnitDataAccess.IsRankEffectMissing(unit);
+                if (rankDirty || rankFxMissing || us.unitRank > 0)
                 {
                     unit.RefreshAfterLevelUp();
-                    log?.LogInfo(
-                        $"[Attach] unit={unit.unit_id} rank→{us.unitRank} exp={rl.exp:0.#}/{rl.exp_req:0.#}");
+                    if (rankDirty || rankFxMissing)
+                        log?.LogInfo(
+                            $"[Attach] unit={unit.unit_id} rank→{us.unitRank} exp={rl.exp:0.#}/{rl.exp_req:0.#}" +
+                            (rankFxMissing && !rankDirty ? " (restore fx)" : ""));
                 }
                 else if (expDirty)
                 {
@@ -1190,6 +1215,9 @@ namespace AnnW.LanMp.Sync
                 log?.LogWarning("[Attach] shield state unit=" + unit.unit_id + ": " + ex.Message);
             }
         }
+
+        /// <summary>Refresh FUI (txt_cd / group_cd / attack status dot) after attach or UX cache invalidate.</summary>
+        public static void RefreshUnitUx(UnitData unit) => TryReDrawUnit(unit);
 
         /// <summary>Refresh FUI (txt_cd / group_cd) after attach stamps UnitData.cd.</summary>
         private static void TryReDrawUnit(UnitData unit)

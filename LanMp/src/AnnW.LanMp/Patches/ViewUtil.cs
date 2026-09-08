@@ -2,6 +2,7 @@ namespace AnnW.LanMp.Patches
 {
     using AnnW.LanMp.Protocol;
     using ANNW;
+    using BepInEx.Logging;
 
     internal static class ViewUtil
     {
@@ -103,6 +104,69 @@ namespace AnnW.LanMp.Patches
             {
                 return true;
             }
+        }
+
+        /// <summary>
+        /// FOW fraction for ActionData.CanDoAction / GetEffectZone.
+        /// Same INV-VIEW rule as GetMoveZone (own/ally → local viewer; Accept → owner).
+        /// </summary>
+        internal static Fraction GetActionUxFowFraction(ActionData action, GS_Battle battle)
+        {
+            if (action?.owner != null)
+                return GetMoveZoneFowFraction(action.owner, battle);
+            if (AnnW.LanMp.Sync.SyncContext.PreferUnitOwnerFowForMoveZone)
+                return action?.player != null ? action.player.fraction : Fraction.NEUTRAL;
+            return GetUxViewFraction(battle);
+        }
+
+        /// <summary>
+        /// Guest UX: local FOW can lag Host — soft-pass TARGET_NOT_VISIBLE for local-faction
+        /// previews only. Host Accept uses PreferUnitOwnerFow / ActionLegality (INV-ACCEPT).
+        /// </summary>
+        internal static bool ShouldSoftPassTargetNotVisible(ActionData action)
+        {
+            if (action?.player == null)
+                return false;
+            if (AnnW.LanMp.Sync.SyncContext.PreferUnitOwnerFowForMoveZone)
+                return false;
+            if (!GateUtil.LanArmed(out var plugin))
+                return false;
+            if (plugin.Net.Role != PeerRole.Guest)
+                return false;
+            var local = plugin.Authority.TryGetLocalHumanPlayer();
+            if (local == null)
+                return false;
+            return action.player.fraction == local.fraction;
+        }
+
+        /// <summary>Clear attack-dot / build-planner caches for local-faction units (Guest miss StartTurn).</summary>
+        internal static void InvalidateLocalCombatUxCaches(ManualLogSource log = null)
+        {
+            if (!GateUtil.LanArmed(out var plugin))
+                return;
+            var local = plugin.Authority.TryGetLocalHumanPlayer();
+            var battle = GS_Battle.self;
+            if (local == null || battle?.all_unit?.units_alive == null)
+                return;
+            try
+            {
+                local.ClearTempMove();
+            }
+            catch { /* ignore */ }
+
+            foreach (var u in battle.all_unit.units_alive)
+            {
+                if (u?.player == null || u.player.fraction != local.fraction)
+                    continue;
+                try { UnitDataAccess.ClearCanAttackAnyone(u); }
+                catch { /* ignore */ }
+                try { u.eq?.ClearMoveOpCache(); }
+                catch { /* ignore */ }
+                try { u.build_planner?.Invalidate(); }
+                catch { /* ignore */ }
+                AnnW.LanMp.Sync.ResultAttachmentBridge.RefreshUnitUx(u);
+            }
+            log?.LogInfo("[View] InvalidateLocalCombatUxCaches fraction=" + local.fraction);
         }
 
         internal static bool ShouldFollowUnitCamera(UnitData unit)
