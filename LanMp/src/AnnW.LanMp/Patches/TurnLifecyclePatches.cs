@@ -13,6 +13,8 @@ namespace AnnW.LanMp.Patches
 {
     /// <summary>
     /// ADR-004 turn cursor + INV-VIEW (last_human = local FOW viewer, never remote seat).
+    /// INV-T10: Host turn progression (NextTurn / EndPlayerTurn / StartNextPlayerTurn → AI)
+    /// is SafePump'd without Apply timeout so multi-AI chains cannot abort mid-turn.
     /// </summary>
     internal static class TurnLifecyclePatches
     {
@@ -59,13 +61,8 @@ namespace AnnW.LanMp.Patches
                 battle.last_levelup_unit = null;
                 BattleEventBus.self.TriggerTurnStarted(battle.turns);
                 TryInvoke(battle, "CaptureAllTurnSnaps");
-                // INV-T10: never yield vanilla StartNextPlayerTurn straight into CoroutineObject
-                // (nested null / int0 busy-spin → Host NextTurn white-screen).
-                yield return AnnWCoroutine.SafePump(
-                    GameController.self.StartNextPlayerTurn(),
-                    AnnWCoroutine.DefaultApplyTimeoutSec,
-                    LanMpPlugin.Log,
-                    "HostNextTurn");
+                // StartNextPlayerTurn Postfix SafePump — do not double-wrap or 45s-timeout here.
+                yield return GameController.self.StartNextPlayerTurn();
             }
 
             private static void TryInvoke(object target, string method)
@@ -97,6 +94,15 @@ namespace AnnW.LanMp.Patches
                 __result = Empty();
                 return false;
             }
+
+            /// <summary>
+            /// Host MannualEndTurn → EndPlayerTurn → StartNextPlayerTurn(AI): wrap once with
+            /// unbounded SafePump so AI null/int0 yields cannot busy-spin CoroutineObject.
+            /// </summary>
+            private static void Postfix(ref IEnumerator __result)
+            {
+                __result = MaybeWrapHostTurnPump(__result, "HostEndPlayerTurn");
+            }
         }
 
         [HarmonyPatch(typeof(GameController), nameof(GameController.StartNextPlayerTurn))]
@@ -112,6 +118,11 @@ namespace AnnW.LanMp.Patches
                     return true;
                 __result = Empty();
                 return false;
+            }
+
+            private static void Postfix(ref IEnumerator __result)
+            {
+                __result = MaybeWrapHostTurnPump(__result, "HostStartNextPlayerTurn");
             }
         }
 
@@ -218,6 +229,40 @@ namespace AnnW.LanMp.Patches
                     return false;
                 local = auth.TryGetLocalHumanPlayer();
                 return true;
+            }
+        }
+
+        /// <summary>
+        /// Single Host turn-progression chokepoint (INV-T10): unbounded SafePump, nested-safe.
+        /// </summary>
+        private static IEnumerator MaybeWrapHostTurnPump(IEnumerator body, string tag)
+        {
+            if (body == null)
+                return Empty();
+            if (!GateUtil.LanArmed(out var plugin))
+                return body;
+            if (plugin.Net.Role != PeerRole.Host || !plugin.Authority.InLanBattle)
+                return body;
+            if (SyncContext.InHostTurnSafePump)
+                return body;
+            return CoHostTurnSafePump(body, tag);
+        }
+
+        private static IEnumerator CoHostTurnSafePump(IEnumerator body, string tag)
+        {
+            var prev = SyncContext.InHostTurnSafePump;
+            SyncContext.InHostTurnSafePump = true;
+            try
+            {
+                yield return AnnWCoroutine.SafePump(
+                    body,
+                    AnnWCoroutine.NoTimeout,
+                    LanMpPlugin.Log,
+                    tag);
+            }
+            finally
+            {
+                SyncContext.InHostTurnSafePump = prev;
             }
         }
 

@@ -41,6 +41,18 @@ namespace AnnW.LanMp.Sync
         /// </summary>
         public static bool PresentationSkipActionCell { get; set; }
 
+        /// <summary>
+        /// Host turn SafePump re-entrancy guard — nested StartNextPlayerTurn/EndPlayerTurn
+        /// must not wrap again while an outer turn pump is active.
+        /// </summary>
+        public static bool InHostTurnSafePump { get; set; }
+
+        /// <summary>
+        /// Host CO skill cast in progress — Bus CreateUnit/DoAction fold into CastSkill attach.
+        /// Independent of <see cref="SuppressNetworkEmit"/> (Accept must not be cleared by CastDone).
+        /// </summary>
+        public static bool SkillCastSuppressEmit { get; set; }
+
         public static IDisposable BeginRemoteApply()
         {
             return new Scope(remote: true);

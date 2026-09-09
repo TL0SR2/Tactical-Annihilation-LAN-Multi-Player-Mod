@@ -48,6 +48,7 @@ ADR-001 要求 Host 权威，但实现曾让 Host/Guest **各自**跑 `MannualEn
 8. **INV-VIEW：** LAN 下 `last_human_player` = 本机 FOW/UI 视角，**不是**当前行动的远端人类席；禁止与 FOWDirty 重绑定互殴（会主线程死锁）。  
 9. Host 权威 EndTurn Accept **只**用 `SuppressNetworkEmit`，不用 `ApplyingRemoteCommand`。  
 10. AnnW `CoroutineObject`：**禁止** `yield return null` 等待（同帧忙等）；帧等待用 `0f` / `AnnWCoroutine.NextTick`。**ApplyQueue / Host Accept 边界必须经 `AnnWCoroutine.SafePump`**（展平嵌套 `IEnumerator`、`null`/`0`/`0f`→NextTick），不得把原版 `DoMoveWithAni` 等直接挂进 CoroutineObject（否则 Apply 永久卡住 → Guest 假观战）。`yield return 0`（boxed int，原版移动/攻击 lerp）必须按「让出一帧」处理，不可当成等待 0 秒而同帧跑完（否则 Guest 瞬移）。
+11. **双超时策略：** Apply/技能/Intent 等待用**挂起预算**（检测卡死协程/丢 Nack）；Guest RemoteWatch、Host 回合/AI SafePump、Host EndTurn Accept 等 `EndTurnReady` 用**回合跨度**（无墙钟上限，仅战局结束退出）。人类长时间不操作与多 AI 长考是合法静默，不得用 Apply 的 45s/RemoteWatch 600s 误杀；对端死亡靠 Net heartbeat。
 
 ## 后果
 

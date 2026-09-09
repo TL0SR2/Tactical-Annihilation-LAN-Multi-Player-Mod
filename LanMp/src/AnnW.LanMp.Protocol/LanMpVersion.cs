@@ -7,6 +7,6 @@ namespace AnnW.LanMp.Protocol
     public static class LanMpVersion
     {
         /// <summary>SemVer displayed in UI, zip name, and Hello/Welcome exchange.</summary>
-        public const string Current = "0.19.5";
+        public const string Current = "0.19.6";
     }
 }

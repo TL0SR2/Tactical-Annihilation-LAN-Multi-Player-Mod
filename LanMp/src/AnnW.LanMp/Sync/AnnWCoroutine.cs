@@ -18,9 +18,18 @@ namespace AnnW.LanMp.Sync
         public static readonly object NextTick = 0f;
 
         /// <summary>
-        /// Default wall-clock budget for one Command apply / Accept body on CoroutineObject.
+        /// Hang budget for one Command apply / Host Accept anim body on CoroutineObject.
+        /// Detects stuck animators — NOT human think time or multi-AI turn span.
         /// </summary>
         public const float DefaultApplyTimeoutSec = 45f;
+
+        /// <summary>
+        /// Turn-span / healthy-silence waits: Host turn progression, Guest RemoteWatch,
+        /// Host EndTurn Accept waiting for EndTurnReady. Never pass Apply's hang budget —
+        /// human AFK and multi-AI chains are valid silence; aborting leaves
+        /// <c>is_ai_processing</c> / false spectate / missing EndTurn.
+        /// </summary>
+        public const float NoTimeout = float.PositiveInfinity;
 
         /// <summary>
         /// Architecture chokepoint: flatten nested <see cref="IEnumerator"/> and map
@@ -29,6 +38,9 @@ namespace AnnW.LanMp.Sync
         /// nesting them under <c>GameController.StartCoroutine</c> busy-spins Apply forever
         /// (<c>ApplyingRemoteCommand</c> stuck → Guest false spectate).
         /// </summary>
+        /// <param name="timeoutSec">
+        /// Hang budget for apply bodies; use <see cref="NoTimeout"/> for turn-span pumps.
+        /// </param>
         public static IEnumerator SafePump(
             IEnumerator inner,
             float timeoutSec = DefaultApplyTimeoutSec,
@@ -42,8 +54,9 @@ namespace AnnW.LanMp.Sync
             stack.Push(inner);
             var guard = 0f;
             var label = string.IsNullOrEmpty(tag) ? "pump" : tag;
+            var bounded = !float.IsInfinity(timeoutSec) && timeoutSec > 0f;
 
-            while (stack.Count > 0 && guard < timeoutSec)
+            while (stack.Count > 0 && (!bounded || guard < timeoutSec))
             {
                 var top = stack.Peek();
                 bool moved;
@@ -76,7 +89,8 @@ namespace AnnW.LanMp.Sync
                     continue;
                 }
 
-                guard += Time.unscaledDeltaTime;
+                if (bounded)
+                    guard += Time.unscaledDeltaTime;
 
                 if (cur is float f)
                 {
@@ -88,10 +102,11 @@ namespace AnnW.LanMp.Sync
                     }
 
                     var waited = 0f;
-                    while (waited < f && guard < timeoutSec)
+                    while (waited < f && (!bounded || guard < timeoutSec))
                     {
                         waited += Time.unscaledDeltaTime;
-                        guard += Time.unscaledDeltaTime;
+                        if (bounded)
+                            guard += Time.unscaledDeltaTime;
                         yield return NextTick;
                     }
                     continue;
@@ -111,10 +126,11 @@ namespace AnnW.LanMp.Sync
 
                     var waited = 0f;
                     var limit = (float)ii;
-                    while (waited < limit && guard < timeoutSec)
+                    while (waited < limit && (!bounded || guard < timeoutSec))
                     {
                         waited += Time.unscaledDeltaTime;
-                        guard += Time.unscaledDeltaTime;
+                        if (bounded)
+                            guard += Time.unscaledDeltaTime;
                         yield return NextTick;
                     }
                     continue;
@@ -124,7 +140,7 @@ namespace AnnW.LanMp.Sync
                 yield return NextTick;
             }
 
-            if (stack.Count > 0)
+            if (bounded && stack.Count > 0)
             {
                 log?.LogWarning(
                     $"[Coroutine] SafePump timeout tag={label} after {timeoutSec:0}s " +

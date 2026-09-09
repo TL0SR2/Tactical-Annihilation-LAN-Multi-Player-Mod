@@ -50,8 +50,9 @@ namespace AnnW.LanMp.Authority
         {
             Unhook();
             ClearPending();
+            // Wake any RemoteWatch; do not leave Guest waiting after abort/leave.
+            _guestWatchSignal = true;
             GuestWatching = false;
-            _guestWatchSignal = false;
         }
 
         public void Tick(float dt) { }
@@ -69,6 +70,7 @@ namespace AnnW.LanMp.Authority
             {
                 Unhook();
                 ClearPending();
+                _guestWatchSignal = true;
                 GuestWatching = false;
             }
         }
@@ -159,8 +161,23 @@ namespace AnnW.LanMp.Authority
             BattleSyncTrace.EvCommand("EndTurnReady", cmd);
 
             // When not suppressed, Sync will broadcast via event (captures board there).
-            if (!SyncContext.SuppressNetworkEmit)
+            // SkillCastSuppressEmit alone must also defer — AI skill mid-turn must not drop EndTurn.
+            if (!SyncContext.SuppressNetworkEmit && !SyncContext.SkillCastSuppressEmit)
                 OnHostEndTurnReady?.Invoke(cmd);
+        }
+
+        /// <summary>
+        /// After skill suppress clears: emit EndTurn that was deferred while SkillCastSuppressEmit.
+        /// Accept SuppressNetworkEmit still blocks (INV-T9).
+        /// </summary>
+        public void TryEmitDeferredEndTurnIfReady()
+        {
+            if (!EndTurnReady || PendingEndTurnCommand == null)
+                return;
+            if (SyncContext.SuppressNetworkEmit || SyncContext.SkillCastSuppressEmit)
+                return;
+            _log.LogInfo("[TurnAuth] Emit deferred EndTurn after skill suppress");
+            OnHostEndTurnReady?.Invoke(PendingEndTurnCommand);
         }
 
         /// <summary>Host: attach board snapshot immediately before broadcast.</summary>
@@ -238,11 +255,15 @@ namespace AnnW.LanMp.Authority
             GuestWatching = false;
         }
 
+        /// <summary>
+        /// Guest occupies a foreign seat until Host EndTurn cursor (or battle leave).
+        /// Turn-span wait — unbounded wall clock. Human AFK / long AI must not WatchTimeout;
+        /// dead peers are NetSession heartbeat, not this loop (INV-T4 / dual timeout policy).
+        /// </summary>
         public IEnumerator CoGuestWatchRemoteTurn()
         {
             GuestWatching = true;
             _guestWatchSignal = false;
-            var waited = 0f;
             _log.LogInfo("[TurnAuth] Guest RemoteWatch start");
             BattleSyncTrace.Ev("WatchStart",
                 curPlayer: GS_Battle.self?.cur_player != null ? GS_Battle.self.cur_player.index : (int?)null,
@@ -250,19 +271,20 @@ namespace AnnW.LanMp.Authority
             var cur = GS_Battle.self?.cur_player;
             if (cur != null)
                 AnnW.LanMp.Presentation.RemoteTurnPresentation.OnSeatActivated(cur, false, _log);
-            while (!_guestWatchSignal && waited < 600f)
+            while (!_guestWatchSignal)
             {
-                waited += Time.unscaledDeltaTime;
+                if (_authority == null || !_authority.InLanBattle || _authority.MatchSettled)
+                {
+                    _log.LogInfo("[TurnAuth] RemoteWatch abort — battle left");
+                    BattleSyncTrace.Ev("WatchAbort", detail: "battle-left");
+                    break;
+                }
                 yield return AnnW.LanMp.Sync.AnnWCoroutine.NextTick;
             }
+            var signaled = _guestWatchSignal;
             GuestWatching = false;
             _guestWatchSignal = false;
-            if (waited >= 600f)
-            {
-                _log.LogWarning("[TurnAuth] RemoteWatch timeout");
-                BattleSyncTrace.Ev("WatchTimeout");
-            }
-            else
+            if (signaled)
             {
                 _log.LogInfo("[TurnAuth] RemoteWatch done");
                 BattleSyncTrace.Ev("WatchEnd");

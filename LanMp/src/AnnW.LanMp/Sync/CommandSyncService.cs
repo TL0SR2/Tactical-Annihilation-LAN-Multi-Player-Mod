@@ -215,20 +215,28 @@ namespace AnnW.LanMp.Sync
 
         private void BeginSkillCastSuppress(string reason)
         {
+            // Skill suppress is independent of Accept SuppressNetworkEmit (INV-T9) —
+            // CastDone must not clear Host Accept / ApplyQueue suppress.
+            SyncContext.SkillCastSuppressEmit = true;
             _skillCastSuppressEmit = true;
-            SyncContext.SuppressNetworkEmit = true;
             _skillCastSuppressSince = Time.unscaledTime;
             _log.LogInfo("[Sync] Skill cast suppress ON (" + reason + ")");
         }
 
         private void ClearSkillCastSuppress(string reason)
         {
-            if (!_skillCastSuppressEmit && !SyncContext.SuppressNetworkEmit)
+            if (!_skillCastSuppressEmit && !SyncContext.SkillCastSuppressEmit)
                 return;
             _skillCastSuppressEmit = false;
-            SyncContext.SuppressNetworkEmit = false;
+            SyncContext.SkillCastSuppressEmit = false;
             _skillCastSuppressSince = 0f;
             _log.LogInfo("[Sync] Skill cast suppress OFF (" + reason + ")");
+            // EndTurn may have been deferred while skill suppress was on (AI skill → turn border).
+            try { TurnAuth?.TryEmitDeferredEndTurnIfReady(); }
+            catch (Exception ex)
+            {
+                _log.LogWarning("[Sync] deferred EndTurn flush: " + ex.Message);
+            }
         }
 
         private void TickHostSkillCastWatchdog()
@@ -636,7 +644,9 @@ namespace AnnW.LanMp.Sync
 
         private bool ShouldEmitFromBus()
         {
-            if (SyncContext.SuppressNetworkEmit || _skillCastSuppressEmit)
+            if (SyncContext.SuppressNetworkEmit ||
+                SyncContext.SkillCastSuppressEmit ||
+                _skillCastSuppressEmit)
                 return false;
             if (_authority == null || !_authority.InLanBattle)
                 return false;
@@ -1375,11 +1385,16 @@ namespace AnnW.LanMp.Sync
                 kind: "EndTurn",
                 turn: GS_Battle.self != null ? GS_Battle.self.turns : (int?)null,
                 curPlayer: GS_Battle.self?.cur_player != null ? GS_Battle.self.cur_player.index : (int?)null);
-            var t0 = Time.unscaledTime;
             // CRITICAL: CoroutineObject treats yield null as same-frame spin — must use float wait
             // or TurnLoop never gets Update and EndTurnReady can never arrive (Host white-screen).
-            while (TurnAuth != null && !TurnAuth.EndTurnReady && Time.unscaledTime - t0 < 45f)
+            // Turn-span wait (INV dual timeout): next StartPlayerTurn may follow a long AI/SafePump
+            // chain — do NOT reuse Apply's 45s hang budget (same class of bug as RemoteWatch 600s).
+            while (TurnAuth != null && !TurnAuth.EndTurnReady)
+            {
+                if (!_authority.InLanBattle || _authority.MatchSettled)
+                    break;
                 yield return AnnWCoroutine.NextTick;
+            }
             SyncContext.SuppressNetworkEmit = false;
 
             var ready = TurnAuth?.ConsumePendingEndTurn();
