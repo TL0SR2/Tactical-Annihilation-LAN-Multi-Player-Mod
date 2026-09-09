@@ -26,7 +26,9 @@ namespace AnnW.LanMp.Protocol
         /// <summary>Legacy Phase A; Phase B uses NoHumanSlot / RoomFull.</summary>
         GuestSlotTaken = 5,
         /// <summary>AnnW.LanMp PluginVersion string mismatch (Hello/Welcome).</summary>
-        PluginVersionMismatch = 6
+        PluginVersionMismatch = 6,
+        /// <summary>Assembly-CSharp (game content) fingerprint mismatch (Hello/Welcome).</summary>
+        ContentFingerprintMismatch = 7
     }
 
     public enum SeatEditNackCode
@@ -125,6 +127,9 @@ namespace AnnW.LanMp.Protocol
         /// <summary>Filled on PluginVersionMismatch for UI.</summary>
         public string hostPluginVersion = "";
         public string guestPluginVersion = "";
+        /// <summary>Filled on ContentFingerprintMismatch for UI.</summary>
+        public string hostContentFingerprint = "";
+        public string guestContentFingerprint = "";
     }
 
     public class SeatEditRequest
@@ -204,6 +209,8 @@ namespace AnnW.LanMp.Protocol
         public string displayName;
         /// <summary>AnnW.LanMp assembly / PluginVersion (e.g. 0.18.3).</summary>
         public string pluginVersion = "";
+        /// <summary>SHA256 hex of AnnW_Data/Managed/Assembly-CSharp.dll (PL4).</summary>
+        public string contentFingerprint = "";
     }
 
     public class WelcomePayload
@@ -213,5 +220,7 @@ namespace AnnW.LanMp.Protocol
         public string displayName;
         public int assignedSeatIndex = -1;
         public string pluginVersion = "";
+        /// <summary>SHA256 hex of Assembly-CSharp.dll (PL4).</summary>
+        public string contentFingerprint = "";
     }
 }

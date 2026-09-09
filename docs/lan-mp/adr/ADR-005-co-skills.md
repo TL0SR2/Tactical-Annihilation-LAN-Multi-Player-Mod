@@ -13,19 +13,18 @@
 
 ## 背景
 
-联机遭遇战中指挥官目前表现为「仅有肖像、无主动技/被动增益」。
+联机遭遇战中指挥官曾表现为「仅有肖像、无主动技/被动增益」（早期 Bootstrap 空 loadout）。
 
-**代码现实（已核对）：**
+**代码现实（2026-09 已落地，对照源码）：**
 
-1. `BattleBootstrap` 构造 `SGS_Player` 时硬编码 `skill = null`、`ps_list = new List<SD_ANNW_PS>()`（`LanMp/.../BattleBootstrap.cs`）。
-2. Vanilla `GS_Battle.SetupForSkirmish` **仅当** `SGS_Player.skill` / `ps_list` 非空时才调用 `CO_Data.SetSKill` / `AddPS`（反编译 `GS_Battle`；DLL：`Assembly-CSharp`）。
-3. `Player.AddCO` → `CO_Data.Init` **只**绑定 `sd_commander` 并清零能量，**不**装默认 skill/PS。默认装载 API 为 `CO_Data.SetAsDefaultSkillAndPS` / `SetRandomSkillAndPS`（DLL 已确认）。
-4. `LobbySeatDto` **仅有** `coId`，无 skill/PS 字段；`BakeForStart` 只解析随机 `coId`。
-5. CastSkill：**已有** Guest Intent → Host 施放 → `OnSkillCastDone` → Command + `CaptureBoard`；Guest Apply **attach-only**（`FowAndSkillPatches` / `CommandSyncService`）。`FOW-SKILL-AUDIT.md` 描述的施法环已接线，但被开局空 loadout **架空**。
-6. 能量：`UnitData.ReduceHP` → `CO_Data.AddEnergy`。Guest DoAction attach-only **不**走 `ReduceHP`。`PlayerSnapDto` **无** `energy` / EffectHost 字段。
-7. **Zero / 自由栏：** 表默认 `skill+pss` 不含 Zero 与第三被动；须从 `UI_CO_SelectResult` 写入 `skillId/psIds`，或 Host `GS_CO.GetActual*` / 解锁池随机戳 DTO。Stamp **不得**覆盖已著作者选技。遭遇战 `PartPS.IsAvailable` 的 `Max(1,level)` 会锁死自由栏（index==2）——LAN 下补丁为 skirmish 解锁三槽。
+1. **开局 loadout（ADR-005 Phase 0）：** Host `CoLoadoutResolver` / `StampDraft` 写入座位 `skillId`+`psIds`；`BattleBootstrap.ApplyToSgsPlayer` 消费座位字段（不再硬编码空 skill）。Guest 不读本地 `GS_CO.GetActual*`。
+2. Vanilla `GS_Battle.SetupForSkirmish` **仅当** `SGS_Player.skill` / `ps_list` 非空时才 `CO_Data.SetSKill` / `AddPS`。
+3. CastSkill：Guest Intent → Host `proc_SkillDoAction` → `OnSkillCastDone` → Command + `CaptureBoard`；Guest **attach-only** + `DoActionAni`（`PresentationSkipActionCell`，禁止重算 DoActionCell）。
+4. 能量 / EffectHost：`PlayerSnapDto.coEnergy` / `skillUsedTimes` / `effectObJson` 经附件同步；Guest **不**走 `ReduceHP`→`AddEnergy`。
+5. 目标技能：Command 必须带 `hasTarget`+坐标（禁止默认落 (0,0)）；所有权技能（MindControl）靠附件 `ownerIndex`→`ConvertUnitOwnerShip`（LoadOb 不触发 OnEffectStart）。
+6. **Zero / 自由栏：** 房间选将经 `setLoadout`；遭遇战 `PartPS.IsAvailable` LAN 补丁解锁三槽。
 
-用户可见症状：Host/Guest 均无被动加成、技能按钮实质不可用（`skill_action == null`）。
+用户可见成功标准：见模块 [M07-co-skills.md](../modules/M07-co-skills.md)。
 
 ## 决策驱动因素
 

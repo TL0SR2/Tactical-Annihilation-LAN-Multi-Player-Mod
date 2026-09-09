@@ -39,6 +39,23 @@ namespace AnnW.LanMp.Tests
         }
 
         [Theory]
+        [InlineData("UnitMoved", true)]
+        [InlineData("DoAction", false)]
+        [InlineData("EndTurn", false)]
+        [InlineData(null, false)]
+        public void ShouldBroadcastAheadOfHostAccept_cases(string kind, bool expected)
+        {
+            Assert.Equal(expected, PresentationRules.ShouldBroadcastAheadOfHostAccept(kind));
+        }
+
+        [Fact]
+        public void Composite_move_then_action_is_eq_chain()
+        {
+            Assert.True(PresentationRules.IsCompositeMoveThenActionChain("UnitMoved", "DoAction"));
+            Assert.False(PresentationRules.IsCompositeMoveThenActionChain("DoAction", "UnitMoved"));
+        }
+
+        [Theory]
         [InlineData(0f, false)]
         [InlineData(1f, true)]
         [InlineData(0.3f, true)]
@@ -111,6 +128,8 @@ namespace AnnW.LanMp.Tests
         [InlineData("EndTurn", false, false, true, AttachmentApplyPolicy.ResourceApplyMode.AllPlayers)]
         [InlineData("CastSkill", true, false, true, AttachmentApplyPolicy.ResourceApplyMode.AllPlayers)]
         [InlineData("CastSkill", true, true, true, AttachmentApplyPolicy.ResourceApplyMode.AllPlayers)]
+        [InlineData("Surrender", true, false, true, AttachmentApplyPolicy.ResourceApplyMode.AllPlayers)]
+        [InlineData("Surrender", true, true, true, AttachmentApplyPolicy.ResourceApplyMode.AllPlayers)]
         [InlineData("DoAction", true, true, true, AttachmentApplyPolicy.ResourceApplyMode.LocalSeatOnly)]
         [InlineData("UnitMoved", true, true, true, AttachmentApplyPolicy.ResourceApplyMode.LocalSeatOnly)]
         [InlineData("Undo", true, true, true, AttachmentApplyPolicy.ResourceApplyMode.LocalSeatOnly)]
@@ -121,6 +140,17 @@ namespace AnnW.LanMp.Tests
             string kind, bool isGuest, bool localTurn, bool hasLocal, AttachmentApplyPolicy.ResourceApplyMode expected)
         {
             Assert.Equal(expected, AttachmentApplyPolicy.GetResourceApplyMode(kind, isGuest, localTurn, hasLocal));
+        }
+
+        [Fact]
+        public void Seat_defeat_flags_apply_even_when_resources_none()
+        {
+            Assert.True(AttachmentApplyPolicy.ShouldApplySeatDefeatFlags(true));
+            Assert.False(AttachmentApplyPolicy.ShouldApplySeatDefeatFlags(false));
+            // DoAction mid-spectate: resources None, but defeated must still stamp.
+            Assert.Equal(
+                AttachmentApplyPolicy.ResourceApplyMode.None,
+                AttachmentApplyPolicy.GetResourceApplyMode("DoAction", true, false, true));
         }
 
         [Theory]

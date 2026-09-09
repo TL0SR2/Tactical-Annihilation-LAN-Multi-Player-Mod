@@ -8,6 +8,15 @@ using UnityEngine;
 
 namespace AnnW.LanMp.Patches
 {
+    /// <summary>
+    /// Runtime gate helpers. Dual-state mapping (PL1 / Xingyi InputGate):
+    /// <list type="bullet">
+    /// <item><see cref="IsAuthoritativeExecution"/> ≈ Host Accept (<c>SuppressNetworkEmit</c>) or Guest/Host Apply (<c>ApplyingRemoteCommand</c>)</item>
+    /// <item><see cref="ShouldRunVanillaBody"/> ≈ Xingyi <c>ShouldRunOriginal</c> via <see cref="InputGateRules.ShouldRunOriginal"/></item>
+    /// <item><see cref="MaySubmitMutation"/> ≈ Xingyi <c>MaySubmit</c> via <see cref="InputGateRules.MaySubmit"/> + in-flight / queue soft-blocks</item>
+    /// </list>
+    /// INV-ACCEPT / Intent≠Command unchanged — these only clarify capture vs apply.
+    /// </summary>
     internal static class GateUtil
     {
         internal static bool LanArmed(out LanMpPlugin plugin)
@@ -17,6 +26,46 @@ namespace AnnW.LanMp.Patches
                 return false;
             var auth = plugin.Authority;
             return auth != null && auth.InLanBattle && auth.GatesArmed;
+        }
+
+        /// <summary>True while Host Accept or Command Apply is driving vanilla bodies.</summary>
+        internal static bool IsAuthoritativeExecution()
+            => SyncContext.ApplyingRemoteCommand || SyncContext.SuppressNetworkEmit;
+
+        /// <summary>When false, Prefixes should capture Intent / block UX instead of running vanilla.</summary>
+        internal static bool ShouldRunVanillaBody()
+            => InputGateRules.ShouldRunOriginal(LanArmed(out _), IsAuthoritativeExecution());
+
+        /// <summary>
+        /// Local seat may emit Guest Intent (or Host is in a capture-eligible window).
+        /// Does not grant board geometry checks — INV-ACCEPT stays Host-only.
+        /// </summary>
+        internal static bool MaySubmitMutation(LanMpPlugin plugin)
+        {
+            if (plugin == null)
+                return false;
+            if (!LanArmed(out var armed) || !ReferenceEquals(armed, plugin))
+                return false;
+            if (!IsBattlePlayPhase())
+                return false;
+            if (plugin.Checksum != null && plugin.Checksum.MismatchPaused)
+                return false;
+            if (IsOwnTurnSyncBusy())
+                return false;
+
+            var battle = GS_Battle.self;
+            if (battle?.cur_player == null)
+                return false;
+            var localTurn = plugin.Authority.IsLocalPlayersTurn(battle.cur_player.index);
+            if (!InputGateRules.MaySubmit(
+                    multiplayerActive: true,
+                    localSeatMayAct: localTurn,
+                    authoritativeExecution: IsAuthoritativeExecution()))
+                return false;
+
+            if (plugin.Net.Role == PeerRole.Guest)
+                return GuestMayEmitIntent(plugin);
+            return true;
         }
 
         internal static bool IsBattlePlayPhase()
@@ -214,8 +263,16 @@ namespace AnnW.LanMp.Patches
         private static bool Prefix(UnitData __instance, Inctor2 move_target)
         {
             var from = __instance != null ? __instance.pos : Inctor2.Zero;
-            return GuestMutationGate.AllowLocalMutation(
-                GuestMutationGate.Kind.UnitMoved, __instance, null, move_target, from);
+            if (!GuestMutationGate.AllowLocalMutation(
+                    GuestMutationGate.Kind.UnitMoved, __instance, null, move_target, from))
+                return false;
+            // PL2: Host-local path — notify Guest before Host anim finishes.
+            try
+            {
+                LanMpPlugin.Instance?.Sync?.TryBroadcastHostLocalMoveAhead(__instance, from, move_target);
+            }
+            catch { /* ignore */ }
+            return true;
         }
     }
 
@@ -227,7 +284,14 @@ namespace AnnW.LanMp.Patches
             var from = __instance != null ? __instance.pos : Inctor2.Zero;
             if (GuestMutationGate.AllowLocalMutation(
                     GuestMutationGate.Kind.UnitMoved, __instance, null, move_target, from))
+            {
+                try
+                {
+                    LanMpPlugin.Instance?.Sync?.TryBroadcastHostLocalMoveAhead(__instance, from, move_target);
+                }
+                catch { /* ignore */ }
                 return true;
+            }
             if (__instance != null)
                 __instance.in_animation = false;
             __result = EmptyRoutine();
@@ -587,13 +651,19 @@ namespace AnnW.LanMp.Patches
     {
         private static bool Prefix(bool victory)
         {
+            // MatchEnd already delivered — run vanilla proc_EndGame settlement UI.
+            if (SyncContext.AllowVanillaEndGameUi)
+                return true;
+
             var plugin = LanMpPlugin.Instance;
             if (plugin == null || !plugin.Enabled.Value)
                 return true;
-            if (!plugin.Authority.InLanBattle)
+            if (plugin.Authority == null || !plugin.Authority.InLanBattle)
                 return true;
+            if (plugin.Authority.MatchSettled)
+                return false;
 
-            // Guest never runs vanilla EndGame — wait for Host MatchEnd payload.
+            // Guest never authorizes EndGame — wait for Host MatchEnd payload.
             if (plugin.Net.Role == PeerRole.Guest)
             {
                 LanMpPlugin.Log?.LogInfo("[Gate] Blocked Guest EndGame (wait MatchEnd)");
@@ -609,6 +679,39 @@ namespace AnnW.LanMp.Patches
             }
 
             return true;
+        }
+    }
+
+    /// <summary>
+    /// Guest CastSkill VFX uses DoActionAni but must not re-sim DoActionCell (ADR-003).
+    /// Patch every override — virtual base Prefix alone does not catch Skill_* overrides.
+    /// </summary>
+    [HarmonyPatch]
+    internal static class Patch_DoActionCell_PresentationOnly
+    {
+        private static System.Collections.Generic.IEnumerable<System.Reflection.MethodBase> TargetMethods()
+        {
+            System.Type[] types;
+            try { types = typeof(ActionData).Assembly.GetTypes(); }
+            catch (System.Reflection.ReflectionTypeLoadException ex)
+            {
+                types = ex.Types;
+            }
+            if (types == null)
+                yield break;
+            foreach (var t in types)
+            {
+                if (t == null || !typeof(ActionData).IsAssignableFrom(t))
+                    continue;
+                var m = AccessTools.DeclaredMethod(t, "DoActionCell");
+                if (m != null)
+                    yield return m;
+            }
+        }
+
+        private static bool Prefix()
+        {
+            return !SyncContext.PresentationSkipActionCell;
         }
     }
 }

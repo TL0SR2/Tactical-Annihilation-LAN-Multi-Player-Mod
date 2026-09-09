@@ -108,14 +108,17 @@ namespace AnnW.LanMp.Patches
                         return true;
                     return !GateUtil.IsBattlePlayPhase();
                 }
-                var intent = plugin.Sync.BuildIntent("CastSkill", target: Inctor2.Zero);
+                var intent = plugin.Sync.BuildIntent("CastSkill");
                 if (skill?.sd_skill != null)
                     intent.extrasJson = skill.sd_skill.name;
                 plugin.Sync.SubmitIntent(intent, guestOptimisticApply: false);
                 return false;
             }
 
-                return true;
+            if (plugin.Net.Role == PeerRole.Host)
+                plugin.Sync.NoteHostSkillCastTarget(null);
+
+            return true;
             }
         }
 
@@ -144,12 +147,16 @@ namespace AnnW.LanMp.Patches
                     }
                     var pos = lt != null ? lt.pos : Inctor2.Zero;
                     var skill = GS_Battle.self?.selected_skill ?? GS_Battle.self?.cur_player?.co_data?.skill_action;
-                    var intent = plugin.Sync.BuildIntent("CastSkill", target: pos);
+                    var intent = plugin.Sync.BuildIntent("CastSkill", target: lt != null ? pos : (Inctor2?)null);
                     if (skill?.sd_skill != null)
                         intent.extrasJson = skill.sd_skill.name;
                     plugin.Sync.SubmitIntent(intent, guestOptimisticApply: false);
                     return false;
                 }
+
+                // Host: remember tile so OnSkillCastDone Command carries orbital-strike targets etc.
+                if (plugin.Net.Role == PeerRole.Host)
+                    plugin.Sync.NoteHostSkillCastTarget(lt);
 
                 return true;
             }

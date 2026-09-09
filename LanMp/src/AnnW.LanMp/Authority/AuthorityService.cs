@@ -5,6 +5,7 @@ using AnnW.LanMp.Core;
 using AnnW.LanMp.Protocol;
 using AnnW.LanMp.Sync;
 using AnnW.LanMp.Ui;
+using ANNW;
 using HarmonyLib;
 using UnityEngine;
 using UnityEngine.SceneManagement;
@@ -149,21 +150,7 @@ namespace AnnW.LanMp.Authority
                     _log.LogWarning("[Authority] reopen lobby after settlement: " + ex.Message);
                 }
 
-                try
-                {
-                    if (LastMatchEnd != null)
-                    {
-                        MatchSettlementUi.Show(
-                            LastMatchEnd,
-                            LastLocalVictory,
-                            GetLocalHumanSlotIndex(),
-                            _net.LocalPeerId);
-                    }
-                }
-                catch (Exception ex)
-                {
-                    _log.LogWarning("[Authority] settlement UI: " + ex.Message);
-                }
+                // Settlement uses vanilla EndGame UI — do not open custom IMGUI (triggers BepInEx console).
             }
 
             if (!InLanBattle || !GatesArmed)
@@ -449,7 +436,7 @@ namespace AnnW.LanMp.Authority
         }
 
         /// <summary>
-        /// Cache settlement, leave battle scene, optional peer drop — no vanilla in-battle EndGame UI.
+        /// Cache settlement, run vanilla <c>proc_EndGame</c> UI (not custom IMGUI), optional peer drop.
         /// INV: Host-only judge already encoded in <paramref name="end"/> (ADR-001 / ADR-004).
         /// </summary>
         private void ApplyMatchSettlementLocal(MatchEndPayload end, bool dropPeers)
@@ -466,28 +453,13 @@ namespace AnnW.LanMp.Authority
             LastLocalVictory = ResolveLocalMatchVictory(end);
             LastMatchEnd = end;
             NoteMatchSettled();
+            MatchSettlementUi.Hide();
 
             _log.LogInfo(
                 $"[Authority] Local settlement victory={LastLocalVictory} role={_net.Role} " +
                 $"(HostFlag={end.victory} winnerFrac={end.winnerFraction})");
 
-            // Immediate feedback — mid-defeat spectate never settles; only MatchEnd reaches here.
-            try
-            {
-                var row = MatchEndRules.FindLocalResult(
-                    end, GetLocalHumanSlotIndex(), _net.LocalPeerId);
-                if (LastLocalVictory && row != null && row.defeated)
-                    UiFeedback.Push("阵营胜利（本席已淘汰·观战至终局）");
-                else if (LastLocalVictory)
-                    UiFeedback.Push("战斗胜利");
-                else
-                    UiFeedback.Push("战斗失败");
-            }
-            catch { /* ignore */ }
-
             UnhookBattleEvents();
-            InLanBattle = false;
-            _lanBattleSceneEntered = false;
             GatesArmed = false;
             PendingBattleId = null;
             _lobby.ClearBattleAuthorization();
@@ -496,20 +468,49 @@ namespace AnnW.LanMp.Authority
             if (dropPeers)
                 _deferredDropPeersAfterMatchEnd = true;
 
+            // Stay in battle scene for vanilla EndGame UI; LAN gates off so Prefix allows it.
+            InLanBattle = false;
+            _lanBattleSceneEntered = false;
+
             try
             {
-                var scene = SceneManager.GetActiveScene().name ?? "";
-                if (scene.IndexOf("Battle", StringComparison.OrdinalIgnoreCase) >= 0)
-                    SceneManager.LoadScene("ANNW_Menu");
+                SyncContext.AllowVanillaEndGameUi = true;
+                var game = SingletonMono<SS_ANNW_Game>.self;
+                if (game != null)
+                {
+                    // EndGame is internal — invoke via reflection (same as Harmony patch target).
+                    var endGame = AccessTools.Method(typeof(SS_ANNW_Game), "EndGame", new[] { typeof(bool) });
+                    if (endGame != null)
+                        endGame.Invoke(game, new object[] { LastLocalVictory });
+                    else
+                        _log.LogWarning("[Authority] MatchEnd — EndGame method missing");
+                }
+                else
+                    _log.LogWarning("[Authority] MatchEnd — SS_ANNW_Game missing, no vanilla settlement");
             }
             catch (Exception ex)
             {
-                _log.LogWarning("[Authority] MatchEnd LoadScene: " + ex.Message);
+                _log.LogWarning("[Authority] vanilla EndGame settlement: " + ex.Message);
+                try
+                {
+                    var scene = SceneManager.GetActiveScene().name ?? "";
+                    if (scene.IndexOf("Battle", StringComparison.OrdinalIgnoreCase) >= 0)
+                        SceneManager.LoadScene("ANNW_Menu");
+                }
+                catch (Exception ex2)
+                {
+                    _log.LogWarning("[Authority] MatchEnd LoadScene fallback: " + ex2.Message);
+                }
+            }
+            finally
+            {
+                SyncContext.AllowVanillaEndGameUi = false;
             }
 
+            // After vanilla returns to menu, reopen LAN lobby (Host room / Guest panel).
             _openLobbyAfterSettlement = true;
             _log.LogInfo(
-                $"[Authority] Match settlement localVictory={LastLocalVictory} — left battle, deferDrop={dropPeers}");
+                $"[Authority] Match settlement localVictory={LastLocalVictory} — vanilla EndGame, deferDrop={dropPeers}");
         }
 
         /// <summary>Abort in-battle session (host left / guest left / leave). Ends battle UI and returns to lobby.</summary>
@@ -968,7 +969,7 @@ namespace AnnW.LanMp.Authority
             _log.LogInfo($"[Authority] MatchEnd received victory={end.victory} reason={end.reason}");
             BattleSyncTrace.Ev("MatchEnd", detail: "recv victory=" + end.victory + " " + (end.reason ?? ""));
             BattleSyncTrace.EndBattleSession("MatchEnd");
-            // No vanilla EndGame — leave battle and show settlement from payload (network may drop).
+            // Vanilla EndGame settlement UI (AllowVanillaEndGameUi); network may drop after.
             ApplyMatchSettlementLocal(end, dropPeers: true);
         }
 

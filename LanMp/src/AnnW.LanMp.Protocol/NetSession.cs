@@ -110,6 +110,8 @@ namespace AnnW.LanMp.Protocol
         public string LocalDisplayName { get; set; } = "";
         /// <summary>AnnW.LanMp PluginVersion stamped into Hello/Welcome.</summary>
         public string LocalPluginVersion { get; set; } = LanMpVersion.Current;
+        /// <summary>Assembly-CSharp SHA256 hex stamped into Hello/Welcome (PL4).</summary>
+        public string LocalContentFingerprint { get; set; } = "";
 
         public string RemoteDisplayName
         {
@@ -237,6 +239,19 @@ namespace AnnW.LanMp.Protocol
                             try { OnLobbyRejected?.Invoke(LastReject); }
                             catch { /* ignore */ }
                             Disconnect("plugin-version-mismatch");
+                            continue;
+                        }
+
+                        if (w != null &&
+                            !GameContentFingerprintRules.IsCompatible(
+                                LocalContentFingerprint, w.contentFingerprint))
+                        {
+                            LastReject = GameContentFingerprintRules.MakeMismatchReject(
+                                w.contentFingerprint, LocalContentFingerprint);
+                            _log.Warn("[Net] Welcome content fingerprint mismatch — disconnecting");
+                            try { OnLobbyRejected?.Invoke(LastReject); }
+                            catch { /* ignore */ }
+                            Disconnect("content-fingerprint-mismatch");
                             continue;
                         }
 
@@ -503,7 +518,8 @@ namespace AnnW.LanMp.Protocol
                     peerId = _localPeerId,
                     protocolVersion = ProtocolVersion,
                     displayName = LocalDisplayName ?? "",
-                    pluginVersion = LocalPluginVersion ?? ""
+                    pluginVersion = LocalPluginVersion ?? "",
+                    contentFingerprint = LocalContentFingerprint ?? ""
                 })
             });
         }
@@ -1015,6 +1031,17 @@ namespace AnnW.LanMp.Protocol
                 return false;
             }
 
+            if (!GameContentFingerprintRules.IsCompatible(LocalContentFingerprint, hello.contentFingerprint))
+            {
+                var mismatch = GameContentFingerprintRules.MakeMismatchReject(
+                    LocalContentFingerprint, hello.contentFingerprint);
+                _log.Warn("[Net] Content fingerprint mismatch host=" +
+                          GameContentFingerprintRules.Normalize(LocalContentFingerprint) +
+                          " guest=" + GameContentFingerprintRules.Normalize(hello.contentFingerprint));
+                SendRejectAndDropConn(peer, mismatch);
+                return false;
+            }
+
             // Already admitted same peerId (reconnect): silently supersede old conn — do not
             // FirePeerDisconnected (would release seat) or Remove from maps under new peer.
             PeerConn existing = null;
@@ -1074,6 +1101,7 @@ namespace AnnW.LanMp.Protocol
                     protocolVersion = ProtocolVersion,
                     displayName = LocalDisplayName ?? "",
                     pluginVersion = LocalPluginVersion ?? "",
+                    contentFingerprint = LocalContentFingerprint ?? "",
                     assignedSeatIndex = -1
                 })
             });

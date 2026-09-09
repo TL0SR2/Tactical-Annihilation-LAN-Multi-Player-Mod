@@ -33,6 +33,26 @@ namespace AnnW.LanMp.Tests
             Assert.False(InputGateRules.MayAuthorizeStart(true, true, false));
             Assert.True(InputGateRules.MayAuthorizeStart(true, true, true));
         }
+
+        [Theory]
+        [InlineData(false, false, true)]
+        [InlineData(false, true, true)]
+        [InlineData(true, false, false)]
+        [InlineData(true, true, true)]
+        public void ShouldRunOriginal_dual_state(bool mp, bool auth, bool expected)
+        {
+            Assert.Equal(expected, InputGateRules.ShouldRunOriginal(mp, auth));
+        }
+
+        [Theory]
+        [InlineData(false, true, false, false)]
+        [InlineData(true, false, false, false)]
+        [InlineData(true, true, true, false)]
+        [InlineData(true, true, false, true)]
+        public void MaySubmit_dual_state(bool mp, bool mayAct, bool auth, bool expected)
+        {
+            Assert.Equal(expected, InputGateRules.MaySubmit(mp, mayAct, auth));
+        }
     }
 
     public class HashAndWireTests

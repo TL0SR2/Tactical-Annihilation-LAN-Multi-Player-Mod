@@ -19,6 +19,7 @@
 | 6 | [SELF-REVIEW.md](./SELF-REVIEW.md) | 问题关闭对照表 |
 | 7 | [modules/](./modules/) | 模块草案 |
 | 7b | [modules/M01-lobby-seats.md](./modules/M01-lobby-seats.md) | **房间座位归属 / 入房容量（M01 增补，待审）** |
+| 8 | [XINGYISTARRY-LEARNING-PLAN.md](./XINGYISTARRY-LEARNING-PLAN.md) | **竞品研究与吸收草案（DRAFT；先审后实现）** |
 
 ## 硬规则
 

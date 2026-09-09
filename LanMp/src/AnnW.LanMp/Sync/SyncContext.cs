@@ -22,11 +22,24 @@ namespace AnnW.LanMp.Sync
         public static bool AllowForcedCreate { get; set; }
 
         /// <summary>
-        /// Host Intent Validate: GetMoveZone AcquireFOWMap uses unit-owner FOW (not INV-VIEW).
-        /// With HostMoveCullFow=false CanWalk is skipped; flag still avoids ally viewer rewrite
-        /// on the acquired map. See IntentAcceptLegalityRules.
+        /// Host Intent Accept: GetMoveZone / CanDoAction AcquireFOWMap use unit-owner FOW
+        /// (not INV-VIEW local viewer). Replaces historical soft TARGET_NOT_VISIBLE accept —
+        /// Accept FOW is authoritative SEEN check on the acting faction map.
+        /// See IntentAcceptLegalityRules.
         /// </summary>
         public static bool PreferUnitOwnerFowForMoveZone { get; set; }
+
+        /// <summary>
+        /// After MatchEnd payload is applied — allow vanilla <c>SS_ANNW_Game.EndGame</c>
+        /// (proc_EndGame settlement UI) once. LAN Prefix otherwise blocks / rebroadcasts.
+        /// </summary>
+        public static bool AllowVanillaEndGameUi { get; set; }
+
+        /// <summary>
+        /// Guest CastSkill presentation runs vanilla <c>DoActionAni</c> for VFX/timing only;
+        /// <c>DoActionCell</c> must no-op (ADR-003 — Host attachment is board truth).
+        /// </summary>
+        public static bool PresentationSkipActionCell { get; set; }
 
         public static IDisposable BeginRemoteApply()
         {

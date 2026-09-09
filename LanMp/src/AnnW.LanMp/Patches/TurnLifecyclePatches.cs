@@ -59,7 +59,13 @@ namespace AnnW.LanMp.Patches
                 battle.last_levelup_unit = null;
                 BattleEventBus.self.TriggerTurnStarted(battle.turns);
                 TryInvoke(battle, "CaptureAllTurnSnaps");
-                yield return GameController.self.StartNextPlayerTurn();
+                // INV-T10: never yield vanilla StartNextPlayerTurn straight into CoroutineObject
+                // (nested null / int0 busy-spin → Host NextTurn white-screen).
+                yield return AnnWCoroutine.SafePump(
+                    GameController.self.StartNextPlayerTurn(),
+                    AnnWCoroutine.DefaultApplyTimeoutSec,
+                    LanMpPlugin.Log,
+                    "HostNextTurn");
             }
 
             private static void TryInvoke(object target, string method)

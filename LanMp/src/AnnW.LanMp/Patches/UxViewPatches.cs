@@ -72,17 +72,10 @@ namespace AnnW.LanMp.Patches
         [HarmonyPatch(typeof(ActionData), nameof(ActionData.CanDoAction))]
         private static class Patch_CanDoAction_Fow
         {
+            // INV-VIEW FOW only — do NOT soft-pass TARGET_NOT_VISIBLE.
+            // Vanilla FOWTile.CanDoAction requires SEEN (vision); DETECTED alone must fail.
             private static IEnumerable<CodeInstruction> Transpiler(IEnumerable<CodeInstruction> instructions) =>
                 RewriteActionPlayerFow(new List<CodeInstruction>(instructions));
-
-            private static void Postfix(ActionData __instance, ref REASON_CANTDO __result)
-            {
-                if (__result != REASON_CANTDO.TARGET_NOT_VISIBLE)
-                    return;
-                if (!ViewUtil.ShouldSoftPassTargetNotVisible(__instance))
-                    return;
-                __result = REASON_CANTDO.OK;
-            }
         }
 
         // GetEffectZone / CheckAttackAnyone / OnMapUnitChange are non-public — patch by name string.

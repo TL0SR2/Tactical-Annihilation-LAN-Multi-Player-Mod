@@ -186,10 +186,8 @@ namespace AnnW.LanMp.Presentation
         }
 
         /// <summary>
-        /// Guest CastSkill presentation (ADR-003 R4 / M07 B7) — mirrors Host
-        /// <c>CO_Data.proc_CastSkill</c> visual half only:
-        /// SkillCastStarted → skill_action.DoActionAni (+ secondary skill_actions) → SkillCastDone.
-        /// Never calls <c>AfterSkillCast</c> (energy/authority stay Host-attach).
+        /// Guest CastSkill presentation (ADR-003 R4 / M07 B7) — same visual path as Host
+        /// <c>CO_Data.proc_CastSkill</c> (DoActionAni / VFX), without AfterSkillCast / DoActionCell.
         /// </summary>
         internal static IEnumerator CoKickSkillCastVisual(CommandDto cmd, ManualLogSource log = null)
         {
@@ -199,24 +197,50 @@ namespace AnnW.LanMp.Presentation
                 log?.LogWarning("[Presentation] SkillCastStarted: " + ex.Message);
             }
 
-            var co = GS_Battle.self?.cur_player?.co_data;
+            var battle = GS_Battle.self;
+            Player caster = null;
+            if (cmd != null && cmd.playerIndex >= 0 && battle?.all_player?.players != null)
+            {
+                foreach (var p in battle.all_player.players)
+                {
+                    if (p != null && p.index == cmd.playerIndex)
+                    {
+                        caster = p;
+                        break;
+                    }
+                }
+            }
+            if (caster == null)
+                caster = battle?.cur_player;
+
+            var co = caster?.co_data;
+            // Host may stamp extrasJson = skill SD name — rebind if Guest CO skill_action drifted.
+            if (co != null && !string.IsNullOrEmpty(cmd?.extrasJson) &&
+                (co.skill_action == null ||
+                 co.skill == null ||
+                 !string.Equals(co.skill.name, cmd.extrasJson, StringComparison.Ordinal)))
+            {
+                try
+                {
+                    if (co.skill == null ||
+                        !string.Equals(co.skill.name, cmd.extrasJson, StringComparison.Ordinal))
+                    {
+                        var sd = SD_ANNW_SKILL.Get(cmd.extrasJson, true);
+                        if (sd != null)
+                            co.SetSKill(sd);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    log?.LogWarning("[Presentation] skill rebind: " + ex.Message);
+                }
+            }
+
             if (co?.skill_action == null)
             {
                 try { BattleEventBus.self.TriggerSkillCastDone(); }
                 catch { /* ignore */ }
                 yield break;
-            }
-
-            // Skill-name banner (Unity WaitForSeconds coroutine — independent of CoroutineObject).
-            try
-            {
-                var pop = SingletonMono<SS_ANNW_Game>.self?.ui?.pop_skillcast;
-                if (pop != null && co.skill != null)
-                    pop.ShowForSkill(co.skill, null);
-            }
-            catch (Exception ex)
-            {
-                log?.LogWarning("[Presentation] pop_skillcast: " + ex.Message);
             }
 
             GameTileData tile = null;
@@ -227,34 +251,55 @@ namespace AnnW.LanMp.Presentation
             }
             catch { tile = null; }
 
-            // Primary skill_action DoActionAni (the cast-process mesh/VFX Host runs).
-            IEnumerator primary = null;
-            try { primary = co.skill_action.DoActionAni(tile, false); }
-            catch (Exception ex)
+            // Vanilla proc_CastSkill does NOT show pop_skillcast text — only DoActionAni VFX.
+            // Skip LanMp text banner; run Ani with PresentationSkipActionCell (no DoActionCell).
+            var prevSkip = SyncContext.PresentationSkipActionCell;
+            SyncContext.PresentationSkipActionCell = true;
+            try
             {
-                log?.LogWarning("[Presentation] skill DoActionAni: " + ex.Message);
-            }
-            if (primary != null)
-                yield return primary;
+                try { AccessTools.Field(typeof(ActionData), "cached_select_zone")?.SetValue(co.skill_action, null); }
+                catch { /* ignore */ }
 
-            // Additional skill_actions[1..] — same order as proc_CastSkill.
-            var extras = co.skill_actions;
-            if (extras != null)
-            {
-                for (var i = 1; i < extras.Count; i++)
+                IEnumerator primary = null;
+                try { primary = co.skill_action.DoActionAni(tile, false); }
+                catch (Exception ex)
                 {
-                    var act = extras[i];
-                    if (act == null)
-                        continue;
-                    IEnumerator more = null;
-                    try { more = act.DoActionAni(tile, false); }
-                    catch (Exception ex)
-                    {
-                        log?.LogWarning("[Presentation] skill_actions[" + i + "] Ani: " + ex.Message);
-                    }
-                    if (more != null)
-                        yield return more;
+                    log?.LogWarning("[Presentation] skill DoActionAni: " + ex.Message);
                 }
+                if (primary != null)
+                {
+                    yield return AnnWCoroutine.SafePump(
+                        primary, AnnWCoroutine.DefaultApplyTimeoutSec, log, "GuestSkillAni");
+                }
+
+                var extras = co.skill_actions;
+                if (extras != null)
+                {
+                    for (var i = 1; i < extras.Count; i++)
+                    {
+                        var act = extras[i];
+                        if (act == null)
+                            continue;
+                        try { AccessTools.Field(typeof(ActionData), "cached_select_zone")?.SetValue(act, null); }
+                        catch { /* ignore */ }
+                        IEnumerator more = null;
+                        try { more = act.DoActionAni(tile, false); }
+                        catch (Exception ex)
+                        {
+                            log?.LogWarning("[Presentation] skill_actions[" + i + "] Ani: " + ex.Message);
+                        }
+                        if (more != null)
+                        {
+                            yield return AnnWCoroutine.SafePump(
+                                more, AnnWCoroutine.DefaultApplyTimeoutSec, log,
+                                "GuestSkillAni:" + i);
+                        }
+                    }
+                }
+            }
+            finally
+            {
+                SyncContext.PresentationSkipActionCell = prevSkip;
             }
 
             try { BattleEventBus.self.TriggerSkillCastDone(); }

@@ -1,8 +1,40 @@
 namespace AnnW.LanMp.Protocol
 {
-    /// <summary>Pure gate rules (M03) — no Unity / no network.</summary>
+    /// <summary>
+    /// Pure gate rules (M03) — no Unity / no network.
+    /// Dual-state table (P-Learn PL1) mirrors XingyiStarry <c>InputGate</c> semantics without
+    /// adopting their full-command replay model — see <see cref="ShouldRunOriginal"/> /
+    /// <see cref="MaySubmit"/>.
+    /// </summary>
     public static class InputGateRules
     {
+        /// <summary>
+        /// Xingyi <c>InputGate.ShouldRunOriginal</c> analogue: when multiplayer is active,
+        /// the vanilla game body runs only during authoritative execution (Host Accept /
+        /// remote Command Apply). Otherwise Prefixes capture Intent / block UX.
+        /// </summary>
+        public static bool ShouldRunOriginal(bool multiplayerActive, bool authoritativeExecution)
+        {
+            if (!multiplayerActive)
+                return true;
+            return authoritativeExecution;
+        }
+
+        /// <summary>
+        /// Xingyi <c>InputGate.MaySubmit</c> analogue: local seat may emit Intent (Guest) or
+        /// drive Host-local apply entry only when it is their act window and we are not
+        /// already inside authoritative execution.
+        /// </summary>
+        public static bool MaySubmit(
+            bool multiplayerActive,
+            bool localSeatMayAct,
+            bool authoritativeExecution)
+        {
+            if (!multiplayerActive || !localSeatMayAct)
+                return false;
+            return !authoritativeExecution;
+        }
+
         public static bool IsLocalPlayersTurn(
             bool inLanBattle,
             bool gatesArmed,

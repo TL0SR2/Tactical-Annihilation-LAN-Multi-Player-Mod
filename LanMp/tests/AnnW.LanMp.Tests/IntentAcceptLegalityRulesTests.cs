@@ -19,12 +19,21 @@ namespace AnnW.LanMp.Tests
         }
 
         [Fact]
-        public void Soft_accept_only_target_not_visible()
+        public void No_soft_accept_cant_do_reasons()
         {
-            Assert.True(IntentAcceptLegalityRules.IsSoftAcceptCantDoReason(2));
+            // TARGET_NOT_VISIBLE (2) must hard-Nack — DETECTED ≠ SEEN for attack.
+            Assert.False(IntentAcceptLegalityRules.IsSoftAcceptCantDoReason(2));
             Assert.False(IntentAcceptLegalityRules.IsSoftAcceptCantDoReason(0));
             Assert.False(IntentAcceptLegalityRules.IsSoftAcceptCantDoReason(5));
             Assert.False(IntentAcceptLegalityRules.IsSoftAcceptCantDoReason(15));
+        }
+
+        [Fact]
+        public void Host_do_action_uses_owner_fow_not_viewer_soft_pass()
+        {
+            Assert.True(IntentAcceptLegalityRules.HostDoActionUsesOwnerFow);
+            Assert.False(IntentAcceptLegalityRules.IsSoftAcceptCantDoReason(
+                IntentAcceptLegalityRules.SoftAcceptCantDoTargetNotVisible));
         }
 
         [Fact]

@@ -276,6 +276,10 @@ namespace AnnW.LanMp.Sync
 
             using (SyncContext.BeginRemoteApply())
             {
+                // Seat defeat / spectate — always, not gated by eco ResourceApplyMode
+                // (Surrender used to skip defeated when mode=None → Guest never spectated).
+                ApplySeatDefeatFlags(dto, log);
+
                 if (applyPlayerResources && dto.players != null)
                 {
                     foreach (var ps in dto.players)
@@ -290,7 +294,6 @@ namespace AnnW.LanMp.Sync
                         var oldMetal = player.metal;
                         var oldPower = player.power;
                         GameAPI.self.SetPlayerResource(player, ps.metal, ps.power);
-                        player.defeated = ps.defeated;
                         if (ps.storage > 0)
                             player.storage = ps.storage;
                         if (ps.metalIncome != 0 || ps.powerIncome != 0 || ps.storage > 0)
@@ -414,6 +417,11 @@ namespace AnnW.LanMp.Sync
                         }
 
                         ApplyShieldState(unit, us, log);
+
+                        // MindControl / capture: EffectHost LoadOb does not run OnEffectStart,
+                        // so ownership must come from Host ownerIndex (叛变协议 etc.).
+                        ApplyOwnerFromSnap(unit, us, log);
+
                         // Rank AFTER effect_host rebind: ClearEffectHostSilent drops effect_rank
                         // that RefreshAfterLevelUp just attached — Guest then shows no rank badge.
                         ApplyEffectHostJson(unit.effect_host, us.effectObJson, "unit", us.unitId, log);
@@ -935,6 +943,56 @@ namespace AnnW.LanMp.Sync
             catch (Exception ex)
             {
                 log?.LogWarning("[Attach] coEnergy player=" + ps.index + ": " + ex.Message);
+            }
+        }
+
+        private static void ApplySeatDefeatFlags(ResultAttachmentDto dto, ManualLogSource log)
+        {
+            if (!AttachmentApplyPolicy.ShouldApplySeatDefeatFlags(dto?.players != null && dto.players.Length > 0))
+                return;
+            foreach (var ps in dto.players)
+            {
+                if (ps == null)
+                    continue;
+                var player = FindPlayer(ps.index);
+                if (player == null)
+                    continue;
+                var wasDefeated = player.defeated;
+                player.defeated = ps.defeated;
+                if (!wasDefeated && ps.defeated)
+                {
+                    try
+                    {
+                        BattleEventBus.self.TriggerPlayerDefeat(player);
+                        log?.LogInfo("[Attach] seat defeated → TriggerPlayerDefeat idx=" + ps.index);
+                    }
+                    catch (Exception ex)
+                    {
+                        log?.LogWarning("[Attach] TriggerPlayerDefeat: " + ex.Message);
+                    }
+                }
+            }
+        }
+
+        private static void ApplyOwnerFromSnap(UnitData unit, UnitSnapDto us, ManualLogSource log)
+        {
+            if (unit == null || us == null || us.ownerIndex < 0 || GameAPI.self == null)
+                return;
+            var want = FindPlayer(us.ownerIndex);
+            if (want == null)
+                return;
+            var cur = unit.player != null ? unit.player.index : -1;
+            if (cur == us.ownerIndex)
+                return;
+            try
+            {
+                GameAPI.self.ConvertUnitOwnerShip(unit, want, false);
+                log?.LogInfo(
+                    $"[Attach] ConvertUnitOwnerShip unit={us.unitId} {cur}→{us.ownerIndex}");
+            }
+            catch (Exception ex)
+            {
+                log?.LogWarning("[Attach] ConvertUnitOwnerShip: " + ex.Message);
             }
         }
 

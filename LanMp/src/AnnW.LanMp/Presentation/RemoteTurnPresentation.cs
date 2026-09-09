@@ -94,6 +94,11 @@ namespace AnnW.LanMp.Presentation
             }
         }
 
+        /// <summary>
+        /// Recompute local-viewer FOW + flush attack/build UX caches (INV-VIEW).
+        /// Chokepoint after board attach / control grant — without this, Guest CanDoAction
+        /// lags Host and historically needed soft TARGET_NOT_VISIBLE (removed).
+        /// </summary>
         internal static void RefreshLocalVision(ManualLogSource log = null)
         {
             if (!GateUtil.LanArmed(out var plugin))
@@ -109,6 +114,7 @@ namespace AnnW.LanMp.Presentation
                 fow.RefreshVision();
                 BattleEventBus.self.TriggerFOWDirty();
                 plugin.Authority.ApplyLocalViewBinding("presentation-fow");
+                ViewUtil.InvalidateLocalCombatUxCaches(log);
             }
             catch (System.Exception ex)
             {
@@ -170,7 +176,6 @@ namespace AnnW.LanMp.Presentation
                 _grantRunning = false;
                 LanMpPlugin.Instance?.Authority?.ApplyLocalViewBinding("control-grant");
                 RefreshLocalVision(log);
-                ViewUtil.InvalidateLocalCombatUxCaches(log);
                 try { UX_Manager.self?.CheckUnitsAndSetUXState(); }
                 catch { /* ignore */ }
             }

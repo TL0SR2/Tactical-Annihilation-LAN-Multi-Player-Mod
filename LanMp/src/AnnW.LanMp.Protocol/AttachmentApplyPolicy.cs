@@ -20,14 +20,21 @@ namespace AnnW.LanMp.Protocol
             bool isLocalHumanTurn,
             bool hasLocalHumanSeat)
         {
-            // EndTurn + CastSkill: full board (skills may spend/grant metal/power for any seat).
-            if (commandKind == "EndTurn" || commandKind == "CastSkill")
+            // Full-board eco: EndTurn / CastSkill / Surrender (defeat wipe may change incomes).
+            if (commandKind == "EndTurn" || commandKind == "CastSkill" || commandKind == "Surrender")
                 return ResourceApplyMode.AllPlayers;
             if (isGuest && hasLocalHumanSeat && isLocalHumanTurn &&
                 (commandKind == "DoAction" || commandKind == "UnitMoved" || commandKind == "Undo"))
                 return ResourceApplyMode.LocalSeatOnly;
             return ResourceApplyMode.None;
         }
+
+        /// <summary>
+        /// Seat <c>defeated</c> must apply on every Command that carries player[] —
+        /// independent of eco ResourceApplyMode (Surrender / mid-turn wipe otherwise skip
+        /// TriggerPlayerDefeat and Guest never enters spectate).
+        /// </summary>
+        public static bool ShouldApplySeatDefeatFlags(bool hasPlayerSnaps) => hasPlayerSnaps;
 
         public static bool ShouldApplyPlayerResources(ResourceApplyMode mode) =>
             mode != ResourceApplyMode.None;

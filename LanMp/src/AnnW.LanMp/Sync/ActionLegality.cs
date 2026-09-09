@@ -18,8 +18,8 @@ namespace AnnW.LanMp.Sync
             typeof(UnitData), "GetMoveZone", new[] { typeof(bool), typeof(bool), typeof(bool) });
 
         /// <summary>
-        /// Host Accept DoAction: extras bind → hard select-zone → soft FOW visibility →
-        /// hard other CanDoAction → hard CanAfford.
+        /// Host Accept DoAction: extras bind → hard select-zone → owner-FOW CanDoAction
+        /// (SEEN hard; no soft TARGET_NOT_VISIBLE) → hard CanAfford.
         /// </summary>
         public static bool TryValidateDoAction(
             UnitData unit,
@@ -47,49 +47,52 @@ namespace AnnW.LanMp.Sync
 
             PrepareActionUxContext(unit, cate, extrasJson);
 
-            GameTileData tile = null;
-            if (hasTarget)
+            // PreferUnitOwnerFow: CanDoAction is INV-VIEW-transpiled; Accept must read the
+            // acting unit's faction FOW (board truth), not Host local-viewer rewrite.
+            var prevFow = SyncContext.PreferUnitOwnerFowForMoveZone;
+            SyncContext.PreferUnitOwnerFowForMoveZone = true;
+            try
             {
-                var pos = new Inctor2(targetX, targetY);
-                if (GameAPI.self != null)
-                    tile = GameAPI.self.GetTile(pos);
-                if (tile == null)
+                GameTileData tile = null;
+                if (hasTarget)
                 {
-                    error = "bad-target";
-                    return false;
+                    var pos = new Inctor2(targetX, targetY);
+                    if (GameAPI.self != null)
+                        tile = GameAPI.self.GetTile(pos);
+                    if (tile == null)
+                    {
+                        error = "bad-target";
+                        return false;
+                    }
+
+                    // Hard: GetSelectZone has no FOW — this is the over-range attack gate.
+                    if (!action.IsPosInSelectZone(unit.pos, tile, unit))
+                    {
+                        error = "out-of-range";
+                        return false;
+                    }
                 }
 
-                // Hard: GetSelectZone has no FOW — this is the over-range attack gate.
-                if (!action.IsPosInSelectZone(unit.pos, tile, unit))
-                {
-                    error = "out-of-range";
-                    return false;
-                }
-            }
-
-            var reason = action.CanDoAction(tile, null);
-            if (reason != REASON_CANTDO.OK)
-            {
-                if (IntentAcceptLegalityRules.IsSoftAcceptCantDoReason((int)reason))
-                {
-                    LanMpPlugin.Log?.LogWarning(
-                        "[ActionLegality] Host soft-accept TARGET_NOT_VISIBLE unit=" +
-                        unit.unit_id + " cate=" + cate);
-                }
-                else
+                // Hard FOW: vanilla CanDoAction needs SEEN; DETECTED → TARGET_NOT_VISIBLE → Nack.
+                var reason = action.CanDoAction(tile, null);
+                if (reason != REASON_CANTDO.OK)
                 {
                     error = MapCantDoCode(reason);
                     return false;
                 }
-            }
 
-            if (!action.CanAfford(tile))
+                if (!action.CanAfford(tile))
+                {
+                    error = "cant-afford";
+                    return false;
+                }
+
+                return true;
+            }
+            finally
             {
-                error = "cant-afford";
-                return false;
+                SyncContext.PreferUnitOwnerFowForMoveZone = prevFow;
             }
-
-            return true;
         }
 
         public static void PrepareActionUxContext(UnitData unit, ActionCate cate, string extrasJson)

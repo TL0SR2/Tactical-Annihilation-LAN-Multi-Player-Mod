@@ -43,6 +43,11 @@ namespace AnnW.LanMp.Protocol
         public bool building;
         public bool spawned;
         public float moveDuration;
+        /// <summary>
+        /// PL2: Host sent UnitMoved geometry early; outbound must not CaptureBoard yet
+        /// (board still pre-move on Host Accept path). Guest applies via DoMoveWithAni.
+        /// </summary>
+        public bool skipResultAttachment;
         /// <summary>False = apply with null tile so AutoSetPos / effect-zone logic runs.</summary>
         public bool hasTarget;
         /// <summary>Host undo stack depth after this command (Guest UI; INV-T presentation).</summary>

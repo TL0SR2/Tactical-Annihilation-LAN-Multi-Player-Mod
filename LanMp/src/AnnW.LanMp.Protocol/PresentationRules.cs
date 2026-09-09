@@ -1,5 +1,7 @@
 namespace AnnW.LanMp.Protocol
 {
+    using System;
+
     /// <summary>Pure presentation gate rules (testable, no Unity).</summary>
     public static class PresentationRules
     {
@@ -33,6 +35,24 @@ namespace AnnW.LanMp.Protocol
         /// DoAction normal broadcasts use moveDuration=1 so legacy 0 only means skip.
         /// UnitMoved normal always uses moveDuration &gt; 0.
         /// </summary>
+        /// <summary>
+        /// P-Learn PL2: Host may broadcast UnitMoved with geometry before Accept animation
+        /// finishes so Guest/spectators start lerp in parallel (Intent≠optimistic mutate).
+        /// </summary>
+        public static bool ShouldBroadcastAheadOfHostAccept(string kind)
+            => string.Equals(kind, "UnitMoved", StringComparison.Ordinal);
+
+        /// <summary>
+        /// P-Learn PL3: Equipment / build-with-move stay as UnitMoved then DoAction (EQ stash),
+        /// not a separate CommandKind — presentation-ahead on the move leg is enough.
+        /// </summary>
+        public static bool IsCompositeMoveThenActionChain(string moveKind, string followUpKind)
+        {
+            if (!string.Equals(moveKind, "UnitMoved", StringComparison.Ordinal))
+                return false;
+            return string.Equals(followUpKind, "DoAction", StringComparison.Ordinal);
+        }
+
         public static bool ShouldFastPresent(float moveDuration, string kind)
         {
             if (moveDuration > 0.001f)

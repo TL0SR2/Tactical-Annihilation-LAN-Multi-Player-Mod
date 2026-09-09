@@ -34,10 +34,15 @@ namespace AnnW.LanMp.Sync
         private readonly ManualLogSource _log;
         private readonly HashSet<string> _seenIntentIds = new HashSet<string>();
         private readonly HashSet<string> _guestOptimisticDone = new HashSet<string>();
+        /// <summary>PL2: UnitMoved keys already broadcast ahead (Host local or Accept).</summary>
+        private readonly HashSet<string> _presentationAheadMoveKeys = new HashSet<string>();
         private bool _eventsHooked;
         private CommandDto _pendingSkillCommand;
         private bool _skillCastSuppressEmit;
         private float _skillCastSuppressSince;
+        private bool _hostSkillHasTarget;
+        private Inctor2 _hostSkillTarget;
+        private string _hostSkillExtras;
         /// <summary>Host: Guest Intent cast must finish or watchdog clears Suppress (B4).</summary>
         private const float HostSkillCastWatchdogSec = 45f;
         private int _actionEmitDepth;
@@ -46,6 +51,7 @@ namespace AnnW.LanMp.Sync
         private Inctor2 _pendingActionTarget;
         private bool _pendingActionHasTarget;
         private string _pendingActionTemplateId;
+        private string _pendingActionExtras;
         private string _lastEmittedDoActionKey;
         private float _lastEmittedDoActionAt;
         private bool _handlingBroadcastFail;
@@ -114,6 +120,7 @@ namespace AnnW.LanMp.Sync
             UnhookBattleEvents();
             _seenIntentIds.Clear();
             _guestOptimisticDone.Clear();
+            _presentationAheadMoveKeys.Clear();
             ClearGuestAwait();
         }
 
@@ -140,6 +147,7 @@ namespace AnnW.LanMp.Sync
                 _outboundPumping = false;
                 _seenIntentIds.Clear();
                 _guestOptimisticDone.Clear();
+                _presentationAheadMoveKeys.Clear();
                 ClearGuestAwait();
             }
         }
@@ -282,21 +290,51 @@ namespace AnnW.LanMp.Sync
             else
             {
                 var battle = GS_Battle.self;
+                var co = battle?.cur_player?.co_data;
+                var extras = _hostSkillExtras;
+                if (string.IsNullOrEmpty(extras) && co?.skill != null)
+                    extras = co.skill.name;
                 cmd = new CommandDto
                 {
                     battleId = LanMpPlugin.Instance?.Lobby?.BattleId,
                     turn = battle != null ? battle.turns : 0,
                     playerIndex = battle?.cur_player != null ? battle.cur_player.index : -1,
                     kind = "CastSkill",
-                    targetX = 0,
-                    targetY = 0
+                    targetX = _hostSkillHasTarget ? _hostSkillTarget.x : 0,
+                    targetY = _hostSkillHasTarget ? _hostSkillTarget.y : 0,
+                    hasTarget = _hostSkillHasTarget,
+                    extrasJson = extras ?? ""
                 };
             }
+
+            _hostSkillHasTarget = false;
+            _hostSkillExtras = null;
 
             // Must clear suppress before ShouldEmitFromBus / Broadcast (Host local path).
             ClearSkillCastSuppress("cast-done");
             HostBroadcastCommand(cmd);
-            _log.LogInfo("[Sync] CastSkill command after cast done");
+            _log.LogInfo(
+                $"[Sync] CastSkill command after cast done hasTarget={cmd.hasTarget} " +
+                $"({cmd.targetX},{cmd.targetY}) extras={cmd.extrasJson}");
+        }
+
+        /// <summary>Host UX: stamp skill tile before proc_CastSkill so Guest VFX aims correctly.</summary>
+        public void NoteHostSkillCastTarget(GameTileData lt)
+        {
+            if (_net.Role != PeerRole.Host)
+                return;
+            _hostSkillHasTarget = lt != null;
+            if (lt != null)
+                _hostSkillTarget = lt.pos;
+            try
+            {
+                var skill = GS_Battle.self?.selected_skill ?? GS_Battle.self?.cur_player?.co_data?.skill_action;
+                if (skill?.sd_skill != null)
+                    _hostSkillExtras = skill.sd_skill.name;
+                else if (GS_Battle.self?.cur_player?.co_data?.skill != null)
+                    _hostSkillExtras = GS_Battle.self.cur_player.co_data.skill.name;
+            }
+            catch { /* ignore */ }
         }
 
         /// <summary>Guest: RemoteWatch until Host EndTurn (TurnAuthority).</summary>
@@ -334,6 +372,7 @@ namespace AnnW.LanMp.Sync
             _pendingActionHasTarget = target != null;
             _pendingActionTarget = target != null ? target.pos : default(Inctor2);
             _pendingActionTemplateId = null;
+            _pendingActionExtras = null;
             try
             {
                 var action = unit.GetAction(cate);
@@ -342,6 +381,7 @@ namespace AnnW.LanMp.Sync
                 else if (GS_Battle.self?.ux_unit_template?.sd_unit != null &&
                          (cate == ActionCate.TRAIN || cate == ActionCate.BUILD))
                     _pendingActionTemplateId = GS_Battle.self.ux_unit_template.sd_unit.name;
+                _pendingActionExtras = ActionLegality.CaptureExtrasForIntent(cate, action);
             }
             catch { /* ignore */ }
 
@@ -354,6 +394,7 @@ namespace AnnW.LanMp.Sync
             var hasTarget = _pendingActionHasTarget;
             var target = _pendingActionTarget;
             var templateId = _pendingActionTemplateId;
+            var extras = _pendingActionExtras;
             var pendingMatched = unit != null &&
                                  _pendingActionUnitId == unit.unit_id &&
                                  _pendingActionCate == cate;
@@ -371,16 +412,18 @@ namespace AnnW.LanMp.Sync
                 hasTarget = false;
                 target = default(Inctor2);
                 templateId = null;
+                extras = null;
                 try
                 {
                     var action = unit.GetAction(cate);
                     if (action?.train_template?.sd_unit != null)
                         templateId = action.train_template.sd_unit.name;
+                    extras = ActionLegality.CaptureExtrasForIntent(cate, action);
                 }
                 catch { /* ignore */ }
             }
 
-            EmitDoActionCommand(unit, cate, target, hasTarget, templateId);
+            EmitDoActionCommand(unit, cate, target, hasTarget, templateId, extras);
         }
 
         private void OnActionExecuted(UnitData unit, ActionCate cate, GameTileData target)
@@ -393,21 +436,26 @@ namespace AnnW.LanMp.Sync
             if (key == _lastEmittedDoActionKey && Time.unscaledTime - _lastEmittedDoActionAt < 0.5f)
                 return;
             string templateId = null;
+            string extras = null;
             try
             {
                 var action = unit.GetAction(cate);
                 if (action?.train_template?.sd_unit != null)
                     templateId = action.train_template.sd_unit.name;
+                extras = ActionLegality.CaptureExtrasForIntent(cate, action);
             }
             catch { /* ignore */ }
             EmitDoActionCommand(
                 unit, cate,
                 target != null ? target.pos : default(Inctor2),
                 target != null,
-                templateId);
+                templateId,
+                extras);
         }
 
-        private void EmitDoActionCommand(UnitData unit, ActionCate cate, Inctor2 target, bool hasTarget, string templateId)
+        private void EmitDoActionCommand(
+            UnitData unit, ActionCate cate, Inctor2 target, bool hasTarget, string templateId,
+            string extrasJson = null)
         {
             var battle = GS_Battle.self;
             var key = unit.unit_id + ":" + (int)cate + ":" + (battle != null ? battle.turns : 0);
@@ -425,7 +473,8 @@ namespace AnnW.LanMp.Sync
                 targetX = target.x,
                 targetY = target.y,
                 hasTarget = hasTarget,
-                templateId = templateId ?? ""
+                templateId = templateId ?? "",
+                extrasJson = extrasJson ?? ""
             });
         }
 
@@ -435,6 +484,16 @@ namespace AnnW.LanMp.Sync
                 return;
             if (unit == null)
                 return;
+
+            // PL2: already broadcast at DoMove start — skip duplicate end-of-move Command.
+            var aheadKey = MakePresentationAheadMoveKey(
+                GS_Battle.self != null ? GS_Battle.self.turns : 0,
+                unit.unit_id, to.x, to.y);
+            if (_presentationAheadMoveKeys.Remove(aheadKey))
+            {
+                _log.LogInfo($"[Sync] UnitMoved Bus skipped (presentation-ahead) unit={unit.unit_id}");
+                return;
+            }
 
             float dur = 0.2f;
             try
@@ -459,6 +518,55 @@ namespace AnnW.LanMp.Sync
                 moveDuration = dur
             });
         }
+
+        /// <summary>
+        /// PL2: Host-local DoMove Prefix — broadcast UnitMoved geometry before Host anim finishes.
+        /// Deduped against <see cref="OnUnitMoved"/>. Does not mutate Guest (ADR-001).
+        /// </summary>
+        internal bool TryBroadcastHostLocalMoveAhead(UnitData unit, Inctor2 from, Inctor2 to)
+        {
+            if (_net.Role != PeerRole.Host || unit == null)
+                return false;
+            if (SyncContext.SuppressNetworkEmit || SyncContext.ApplyingRemoteCommand || SyncContext.InApplyEnumerator)
+                return false;
+            if (!ShouldEmitFromBus())
+                return false;
+
+            var battle = GS_Battle.self;
+            var turn = battle != null ? battle.turns : 0;
+            var key = MakePresentationAheadMoveKey(turn, unit.unit_id, to.x, to.y);
+            if (!_presentationAheadMoveKeys.Add(key))
+                return false;
+
+            float dur = 0.2f;
+            try
+            {
+                if (unit.template?.sd_unit != null)
+                    dur = unit.template.sd_unit.ani_speed;
+            }
+            catch { /* default */ }
+
+            var cmd = new CommandDto
+            {
+                battleId = LanMpPlugin.Instance?.Lobby?.BattleId,
+                turn = turn,
+                playerIndex = battle?.cur_player != null ? battle.cur_player.index : -1,
+                kind = "UnitMoved",
+                netUnitId = unit.unit_id,
+                fromX = from.x,
+                fromY = from.y,
+                targetX = to.x,
+                targetY = to.y,
+                moveDuration = dur,
+                skipResultAttachment = true
+            };
+            HostBroadcastCommand(cmd);
+            _log.LogInfo($"[Sync] UnitMoved presentation-ahead (Host local) unit={unit.unit_id} -> ({to.x},{to.y})");
+            return true;
+        }
+
+        private static string MakePresentationAheadMoveKey(int turn, int unitId, int toX, int toY)
+            => turn + ":" + unitId + ":" + toX + ":" + toY;
 
         private void OnUnitCreated(UnitData unit, CREATE_REASON reason)
         {
@@ -822,7 +930,7 @@ namespace AnnW.LanMp.Sync
             // EndTurn board capture deferred here (bus AI path + Accept enqueue).
             if (cmd.kind == "EndTurn" && string.IsNullOrEmpty(cmd.resultAttachmentJson))
                 TurnAuth?.AttachBoardSnapshot(cmd);
-            else
+            else if (!cmd.skipResultAttachment)
                 MaybeAttachResults(cmd);
 
             if (cmd.kind == "EndTurn")
@@ -924,6 +1032,8 @@ namespace AnnW.LanMp.Sync
                 seatFilter,
                 removeMissingUnits,
                 applyWrecks);
+            // Board truth moved — refresh INV-VIEW FOW + combat UX (no soft TARGET_NOT_VISIBLE).
+            RemoteTurnPresentation.RefreshLocalVision(_log);
         }
 
         /// <summary>
@@ -966,7 +1076,7 @@ namespace AnnW.LanMp.Sync
                 return;
             if (cmd.kind != "DoAction" && cmd.kind != "UnitMoved" && cmd.kind != "Undo"
                 && cmd.kind != "CastSkill" && cmd.kind != "CreateUnit" && cmd.kind != "RemoveUnit"
-                && cmd.kind != "EndTurn")
+                && cmd.kind != "EndTurn" && cmd.kind != "Surrender")
                 return;
 
             try
@@ -1031,7 +1141,16 @@ namespace AnnW.LanMp.Sync
                     SendIntentNack(intent.intentId, "no-source-peer", null);
                     return;
                 }
-                if (!TryValidateGuestPeerOwnsCurrentTurn(_nackTargetPeerId, out var peerErr))
+                // Surrender: peer must own the surrendering seat (pause menu — not necessarily current turn).
+                if (intent.kind == "Surrender")
+                {
+                    if (!TryValidateGuestPeerOwnsSeat(_nackTargetPeerId, intent.playerIndex, out var seatErr))
+                    {
+                        SendIntentNack(intent.intentId, seatErr, MapNackMessage(seatErr) ?? "");
+                        return;
+                    }
+                }
+                else if (!TryValidateGuestPeerOwnsCurrentTurn(_nackTargetPeerId, out var peerErr))
                 {
                     _log.LogWarning("[Sync] Guest peer not current operator: " + peerErr);
                     BattleSyncTrace.EvIntent("IntentNack", intent, detail: peerErr);
@@ -1067,6 +1186,18 @@ namespace AnnW.LanMp.Sync
 
             var cmd = ToCommand(intent);
             BattleSyncTrace.EvIntent("IntentAccept", intent);
+
+            if (intent.kind == "Surrender")
+            {
+                var seat = FindPlayerByIndex(intent.playerIndex);
+                if (seat == null || seat.defeated)
+                {
+                    SendIntentNack(intent.intentId, "already-defeated", "该席位已战败");
+                    return;
+                }
+                HostApplySurrender(seat, intent.intentId);
+                return;
+            }
 
             if (intent.kind == "CastSkill")
             {
@@ -1274,23 +1405,38 @@ namespace AnnW.LanMp.Sync
             // before ExecuteAction so Guest SHIELD_GEN / ATTACK are not fast-skipped on Host
             // (moveDuration was 0 until HostBroadcastCommand).
             // INV-T10: SafePump — Host Accept also runs on CoroutineObject; raw nested animators hang.
+            // PL2: UnitMoved broadcasts ahead of Host anim so Guest starts lerp in parallel.
+            // INV-T9: Host Accept uses SuppressNetworkEmit only — never ApplyingRemoteCommand
+            // (that flag is Guest/replay). Bus twin emit blocked by Suppress.
             SyncContext.SuppressNetworkEmit = true;
-            SyncContext.ApplyingRemoteCommand = true;
             try
             {
                 StampPresentationHints(cmd);
+                var ahead = PresentationRules.ShouldBroadcastAheadOfHostAccept(cmd.kind);
+                string aheadKey = null;
+                if (ahead)
+                {
+                    var turn = GS_Battle.self != null ? GS_Battle.self.turns : 0;
+                    aheadKey = MakePresentationAheadMoveKey(turn, cmd.netUnitId, cmd.targetX, cmd.targetY);
+                    _presentationAheadMoveKeys.Add(aheadKey);
+                    cmd.skipResultAttachment = true;
+                    HostBroadcastCommand(cmd);
+                }
+
                 yield return AnnWCoroutine.SafePump(
                     CoApplyCommandBody(cmd),
                     AnnWCoroutine.DefaultApplyTimeoutSec,
                     _log,
                     "HostAccept:" + (cmd.kind ?? "?"));
-                if (cmd.kind != "EndTurn")
+                if (!ahead && cmd.kind != "EndTurn")
                     HostBroadcastCommand(cmd);
+                // Accept suppresses Bus OnUnitMoved — drop ahead key so later moves can re-use tile.
+                if (aheadKey != null)
+                    _presentationAheadMoveKeys.Remove(aheadKey);
             }
             finally
             {
                 SyncContext.SuppressNetworkEmit = false;
-                SyncContext.ApplyingRemoteCommand = false;
                 SyncContext.InApplyEnumerator = false;
             }
         }
@@ -1325,17 +1471,25 @@ namespace AnnW.LanMp.Sync
             BeginSkillCastSuppress("guest-intent");
             try
             {
-                var pos = new Inctor2(cmd.targetX, cmd.targetY);
-                var tile = battle.terrain != null ? battle.terrain.GetTile(pos) : null;
-                if (tile == null && GameAPI.self != null)
-                    tile = GameAPI.self.GetTile(pos);
-                if (tile == null && battle.terrain != null)
-                    tile = battle.terrain.GetTile(Inctor2.Zero);
+                GameTileData tile = null;
+                if (cmd.hasTarget)
+                {
+                    var pos = new Inctor2(cmd.targetX, cmd.targetY);
+                    tile = battle.terrain != null ? battle.terrain.GetTile(pos) : null;
+                    if (tile == null && GameAPI.self != null)
+                        tile = GameAPI.self.GetTile(pos);
+                    // Do NOT fall back to (0,0) — that mis-aims orbital strike / targeted skills.
+                }
 
                 battle.selected_skill = co.skill_action;
+                NoteHostSkillCastTarget(tile);
+                if (!string.IsNullOrEmpty(cmd.extrasJson))
+                    _hostSkillExtras = cmd.extrasJson;
                 ux.SetUXState_Skill(co.skill_action);
                 ux.coroutineObject.StartCoroutine(ux.proc_SkillDoAction(tile));
-                _log.LogInfo($"[Sync] Host casting skill for intent at ({cmd.targetX},{cmd.targetY})");
+                _log.LogInfo(
+                    $"[Sync] Host casting skill for intent hasTarget={cmd.hasTarget} " +
+                    $"({cmd.targetX},{cmd.targetY}) extras={cmd.extrasJson}");
                 return true;
             }
             catch (Exception ex)
@@ -1375,12 +1529,159 @@ namespace AnnW.LanMp.Sync
             return true;
         }
 
+        private bool TryValidateGuestPeerOwnsSeat(string sourcePeerId, int seatIndex, out string error)
+        {
+            error = null;
+            if (seatIndex < 0)
+            {
+                error = "no-player";
+                return false;
+            }
+            var owner = _authority?.GetOwnerPeerIdForSeat(seatIndex);
+            if (string.IsNullOrEmpty(owner) ||
+                !string.Equals(owner, sourcePeerId, StringComparison.Ordinal))
+            {
+                error = "not-your-seat";
+                return false;
+            }
+            return true;
+        }
+
+        private static Player FindPlayerByIndex(int index)
+        {
+            var players = GS_Battle.self?.all_player?.players;
+            if (players == null)
+                return null;
+            foreach (var p in players)
+            {
+                if (p != null && p.index == index)
+                    return p;
+            }
+            return null;
+        }
+
+        /// <summary>
+        /// Mark seat defeated, clear army (sync-friendly), spectate path via TriggerPlayerDefeat.
+        /// If last opposing faction, SkirmishLogic → EndGame → MatchEnd + vanilla settlement.
+        /// </summary>
+        public void HostApplySurrender(Player seat, string sourceIntentId)
+        {
+            if (_net.Role != PeerRole.Host || seat == null)
+                return;
+            if (seat.defeated)
+                return;
+            if (_authority != null && _authority.MatchSettled)
+                return;
+
+            _log.LogInfo("[Sync] HostApplySurrender seat=" + seat.index + " intent=" + (sourceIntentId ?? "-"));
+
+            SyncContext.SuppressNetworkEmit = true;
+            try
+            {
+                seat.defeated = true;
+                try { BattleEventBus.self.TriggerPlayerDefeat(seat); }
+                catch (Exception ex)
+                {
+                    _log.LogWarning("[Sync] TriggerPlayerDefeat: " + ex.Message);
+                }
+
+                try
+                {
+                    var msg = SingletonMono<SS_ANNW_Game>.self?.ui?.messages;
+                    if (msg != null)
+                    {
+                        var text = string.Format(
+                            LAN.Get("MSG_PlayerDefeat") ?? "Player {0} defeated",
+                            seat.index + 1);
+                        msg.AddMessage(text);
+                    }
+                }
+                catch { /* ignore */ }
+
+                // Instant clear — animated wipe would race CaptureBoard (Guest would still see army).
+                var doomed = new List<UnitData>();
+                if (seat.units != null)
+                    doomed.AddRange(seat.units);
+                foreach (var u in doomed)
+                {
+                    if (u == null || u.dead)
+                        continue;
+                    try { GameAPI.self?.RemoveUnit(u); }
+                    catch (Exception ex)
+                    {
+                        _log.LogWarning("[Sync] Surrender RemoveUnit: " + ex.Message);
+                    }
+                }
+                try
+                {
+                    var reinforce = GS_Battle.self?.all_reinforce;
+                    if (reinforce != null)
+                        AccessTools.Method(typeof(AllReinforceData), "RemoveByPlayer", new[] { typeof(Player) })
+                            ?.Invoke(reinforce, new object[] { seat });
+                }
+                catch { /* ignore */ }
+            }
+            finally
+            {
+                SyncContext.SuppressNetworkEmit = false;
+            }
+
+            // SkirmishLogic may have EndGame → MatchSettled; otherwise sync defeated board to Guests.
+            if (_authority != null && _authority.MatchSettled)
+                return;
+
+            var cmd = new CommandDto
+            {
+                cmdId = Guid.NewGuid().ToString("N"),
+                sourceIntentId = sourceIntentId ?? "",
+                battleId = LanMpPlugin.Instance?.Lobby?.BattleId ?? "",
+                turn = GS_Battle.self != null ? GS_Battle.self.turns : 0,
+                playerIndex = seat.index,
+                kind = "Surrender",
+                hasTarget = false
+            };
+            MaybeAttachResults(cmd);
+            HostBroadcastCommand(cmd);
+            _log.LogInfo("[Sync] Surrender broadcast seat=" + seat.index);
+        }
+
         private bool TryValidateAgainstBattle(IntentDto intent, out string error)
         {
             var battle = GS_Battle.self;
             var bid = LanMpPlugin.Instance?.Lobby?.BattleId ?? "";
             var turn = battle != null ? battle.turns : -1;
             var cur = battle?.cur_player != null ? battle.cur_player.index : -1;
+
+            // Surrender is pause-menu — not tied to current turn cursor.
+            if (intent.kind == "Surrender")
+            {
+                error = null;
+                if (_authority == null || !_authority.InLanBattle || !_authority.GatesArmed)
+                {
+                    error = "gates-inactive";
+                    return false;
+                }
+                if (!string.IsNullOrEmpty(bid) &&
+                    !string.IsNullOrEmpty(intent.battleId) &&
+                    intent.battleId != bid)
+                {
+                    error = "battle-mismatch";
+                    return false;
+                }
+                var seat = FindPlayerByIndex(intent.playerIndex);
+                if (seat == null)
+                {
+                    error = "no-player";
+                    return false;
+                }
+                if (seat.defeated)
+                {
+                    error = "already-defeated";
+                    return false;
+                }
+                return true;
+            }
+
             if (!IntentValidateRules.TryValidateBasics(
                     _authority != null && _authority.InLanBattle,
                     _authority != null && _authority.GatesArmed,
@@ -1428,7 +1729,7 @@ namespace AnnW.LanMp.Sync
                     return false;
                 }
 
-                // INV-ACCEPT: Host ActionLegality only (geometry hard / FOW soft).
+                // INV-ACCEPT: Host ActionLegality only (geometry + owner-FOW SEEN hard).
                 // Bind BUILD/TRAIN/UNLOAD UX from extras before CanDoAction.
                 if (intent.kind == "DoAction")
                 {
@@ -1504,6 +1805,10 @@ namespace AnnW.LanMp.Sync
                     return null;
                 case "unit-not-owned":
                     return InputGateRules.BlockReasonNotYourUnit;
+                case "not-your-seat":
+                    return "只能投降本席";
+                case "already-defeated":
+                    return "该席位已战败";
                 case "unit-missing":
                     return null;
                 default:
@@ -1582,15 +1887,11 @@ namespace AnnW.LanMp.Sync
                         {
                             // DoAction / CastSkill apply inside their attach-only coroutines.
                         }
+                        // UnitMoved: body animates then board stamp (positions already lerped).
                         if (ResultAttachmentCodec.HasPayload(attach) && cmd.kind == "UnitMoved")
                             ApplyResultAttachment(attach, cmd.kind, snapPositions: false);
-                        else if (ResultAttachmentCodec.HasPayload(attach) && cmd.kind == "DoAction")
-                        {
-                            var cate = (ActionCate)cmd.actionCate;
-                            if (cate != ActionCate.BUILD && cate != ActionCate.TRAIN &&
-                                cate != ActionCate.QUICK_BUILD_MINER)
-                                ApplyResultAttachment(attach, cmd.kind, snapPositions: false);
-                        }
+                        // Do NOT re-Apply DoAction here — CoApplyDoAction attach-only already did
+                        // (double Apply caused ownership/HP flicker and MindControl thrash).
                     }
                     catch (Exception ex)
                     {
@@ -1855,6 +2156,10 @@ namespace AnnW.LanMp.Sync
                 case "CastSkill":
                     _log.LogInfo("[Sync] CastSkill apply = attachment only");
                     break;
+                case "Surrender":
+                    // Board truth in attachment (defeated + wiped units); spectate via player.defeated.
+                    _log.LogInfo("[Sync] Surrender apply seat=" + cmd.playerIndex);
+                    break;
                 case "CreateUnit":
                     ApplyCreateUnit(cmd);
                     break;
@@ -2057,10 +2362,31 @@ namespace AnnW.LanMp.Sync
                 yield return CoPresentDeferredDeathsAndWrecks(doomed, attach, attacker: null);
 
             ActionPresentation.AfterAttachApply(attach, _log, cmd, idsBefore);
+            ClearGuestSkillUxAfterCast();
             RemoteTurnPresentation.RefreshLocalVision(_log);
             ResultAttachmentBridge.RefreshUnactionedLists(_log);
             _log.LogInfo(
                 $"[Sync] Applied CastSkill(attach-only) deaths={doomed?.Count ?? 0} units={attach.units?.Length ?? 0}");
+        }
+
+        /// <summary>
+        /// Guest never runs AfterSkillCast / proc_SkillDoAction epilogue — clear UX skill selection
+        /// so the next turn does not keep a stale selected_skill highlight.
+        /// </summary>
+        private static void ClearGuestSkillUxAfterCast()
+        {
+            try
+            {
+                var battle = GS_Battle.self;
+                if (battle != null)
+                {
+                    battle.selected_skill = null;
+                    battle.ux_action_cate = ActionCate.NONE;
+                }
+                try { BattleEventBus.self.TriggerUXStateChanged(); }
+                catch { /* ignore */ }
+            }
+            catch { /* ignore */ }
         }
 
         private static void EnsureUnitActed(UnitData unit)

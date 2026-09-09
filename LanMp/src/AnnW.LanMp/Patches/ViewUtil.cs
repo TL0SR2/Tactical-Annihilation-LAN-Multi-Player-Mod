@@ -108,7 +108,8 @@ namespace AnnW.LanMp.Patches
 
         /// <summary>
         /// FOW fraction for ActionData.CanDoAction / GetEffectZone.
-        /// Same INV-VIEW rule as GetMoveZone (own/ally → local viewer; Accept → owner).
+        /// UX: INV-VIEW local viewer for own/ally. Host Accept: PreferUnitOwnerFow → owner map
+        /// (authoritative SEEN; never soft-pass TARGET_NOT_VISIBLE).
         /// </summary>
         internal static Fraction GetActionUxFowFraction(ActionData action, GS_Battle battle)
         {
@@ -117,26 +118,6 @@ namespace AnnW.LanMp.Patches
             if (AnnW.LanMp.Sync.SyncContext.PreferUnitOwnerFowForMoveZone)
                 return action?.player != null ? action.player.fraction : Fraction.NEUTRAL;
             return GetUxViewFraction(battle);
-        }
-
-        /// <summary>
-        /// Guest UX: local FOW can lag Host — soft-pass TARGET_NOT_VISIBLE for local-faction
-        /// previews only. Host Accept uses PreferUnitOwnerFow / ActionLegality (INV-ACCEPT).
-        /// </summary>
-        internal static bool ShouldSoftPassTargetNotVisible(ActionData action)
-        {
-            if (action?.player == null)
-                return false;
-            if (AnnW.LanMp.Sync.SyncContext.PreferUnitOwnerFowForMoveZone)
-                return false;
-            if (!GateUtil.LanArmed(out var plugin))
-                return false;
-            if (plugin.Net.Role != PeerRole.Guest)
-                return false;
-            var local = plugin.Authority.TryGetLocalHumanPlayer();
-            if (local == null)
-                return false;
-            return action.player.fraction == local.fraction;
         }
 
         /// <summary>Clear attack-dot / build-planner caches for local-faction units (Guest miss StartTurn).</summary>

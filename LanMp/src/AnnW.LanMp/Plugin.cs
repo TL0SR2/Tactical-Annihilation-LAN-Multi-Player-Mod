@@ -107,8 +107,22 @@ namespace AnnW.LanMp
                 return;
             }
 
+            // PL0 / A14: refuse to arm Harmony when XingyiStarry.Mp (or sibling) is present.
+            if (CompetingPluginProbe.TryDetect(out var competing))
+            {
+                var msg = CompetingPluginRules.FormatConflictMessage(competing);
+                Log.LogError("[LanMp] " + msg);
+                try { UiFeedback.Push(msg); } catch { /* UI may be unavailable at Awake */ }
+                return;
+            }
+
+            var contentFp = GameContentFingerprint.ComputeSha256Hex();
+            if (string.IsNullOrEmpty(contentFp))
+                Log.LogWarning("[LanMp] Content fingerprint empty — Hello handshake will reject peers.");
+
             Net = new NetSession(_lanLog);
             Net.LocalPluginVersion = LanMpVersion.Current;
+            Net.LocalContentFingerprint = contentFp;
             Lobby = new LobbySession(Net, _lanLog);
             Authority = new AuthorityService(Lobby, Net, Log);
             Lobby.IsBattleStartedGate = () => Lobby.StartAuthorized || Authority.InLanBattle;
@@ -257,10 +271,8 @@ namespace AnnW.LanMp
             if (!Enabled.Value)
                 return;
 
-            // Settlement must show even when debug IMGUI is off (native floater + this modal).
-            MatchSettlementUi.Draw();
-
             // Injector IMGUI thoroughly disabled. Lobby is native game popup only.
+            // Match settlement uses vanilla EndGame UI (not MatchSettlementUi IMGUI).
             if (EnableDebugImgui == null || !EnableDebugImgui.Value)
                 return;
             LanHud.Draw(this);
@@ -349,20 +361,13 @@ namespace AnnW.LanMp
         {
             try
             {
-                var path = Path.Combine(Paths.GameRootPath, "AnnW_Data", "Managed", "Assembly-CSharp.dll");
-                if (!File.Exists(path))
+                var hex = GameContentFingerprint.ComputeSha256Hex();
+                if (string.IsNullOrEmpty(hex))
                 {
                     Log.LogWarning("Assembly-CSharp.dll not found for hash.");
                     return;
                 }
-
-                using (var fs = File.OpenRead(path))
-                using (var sha = SHA256.Create())
-                {
-                    var hash = sha.ComputeHash(fs);
-                    var hex = BitConverter.ToString(hash).Replace("-", "").ToLowerInvariant();
-                    Log.LogInfo($"Assembly-CSharp SHA256={hex}");
-                }
+                Log.LogInfo($"Assembly-CSharp SHA256={hex}");
             }
             catch (Exception ex)
             {

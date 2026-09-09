@@ -9,7 +9,13 @@ namespace AnnW.LanMp.Protocol
     ///   so Host zone ⊇ Guest UX paint when unit position matches. Geometry miss ⇒ hard Nack
     ///   (blocks desynced over-range Apply). FOW cannot false-Nack Host move Accept.
     /// - IsPosInSelectZone / GetSelectZone have no FOW — hard out-of-range for DoAction.
-    /// - ActionData.CanDoAction FOW check (TARGET_NOT_VISIBLE) is soft — Host FOW can lag UX.
+    /// - ActionData.CanDoAction FOW (TARGET_NOT_VISIBLE) is hard — vanilla needs FOWState.SEEN;
+    ///   DETECTED alone must Nack (attack requires vision, not mere detection).
+    /// - Host Accept CanDoAction uses unit-owner FOW (PreferUnitOwnerFow), not INV-VIEW —
+    ///   this replaces the old soft TARGET_NOT_VISIBLE accept that masked viewer rewrite.
+    /// - Guest UX CanDoAction/GetEffectZone uses INV-VIEW local viewer; never soft-pass
+    ///   TARGET_NOT_VISIBLE. After board attach, RefreshLocalVision + combat UX cache flush
+    ///   keeps Guest paint aligned with Host FOW (no lag soft-pass).
     /// - Guest must NOT re-run GetMoveZone/CanDoAction fail-fast (second chokepoint / INV-VIEW).
     /// </summary>
     public static class IntentAcceptLegalityRules
@@ -28,14 +34,18 @@ namespace AnnW.LanMp.Protocol
         public const bool UxMoveCullFow = true;
 
         /// <summary>
-        /// CanDoAction reason codes that Host soft-accepts (continue Apply).
-        /// Only FOW visibility — not range, afford, factory BP, etc.
-        /// Values mirror ANNW.REASON_CANTDO where TARGET_NOT_VISIBLE == 2.
+        /// Host Accept DoAction FOW must use acting unit owner map (not INV-VIEW rewrite).
+        /// </summary>
+        public const bool HostDoActionUsesOwnerFow = true;
+
+        /// <summary>
+        /// Historical: TARGET_NOT_VISIBLE (==2) used to soft-accept for Host FOW lag.
+        /// That let DETECTED-only attacks through; now always hard Nack (vanilla SEEN).
         /// </summary>
         public const int SoftAcceptCantDoTargetNotVisible = 2;
 
-        public static bool IsSoftAcceptCantDoReason(int reasonCantDo) =>
-            reasonCantDo == SoftAcceptCantDoTargetNotVisible;
+        /// <summary>No CanDoAction reasons are soft-accepted on Host.</summary>
+        public static bool IsSoftAcceptCantDoReason(int reasonCantDo) => false;
 
         /// <summary>Guest gate may check ownership/spent only — never board geometry/FOW.</summary>
         public static bool GuestMayFailFastBoardLegality => false;
