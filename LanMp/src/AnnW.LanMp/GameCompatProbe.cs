@@ -22,11 +22,40 @@ namespace AnnW.LanMp
                 ProbeSgsFields(log);
                 ProbeSetupMethod(log);
                 ProbeDataUtilsTables(log);
+                ProbeLocalizationTable(log);
+                ProbeEndTurnApi(log);
             }
             catch (Exception ex)
             {
                 log.LogWarning("[Compat] probe failed: " + ex.Message);
             }
+        }
+
+        private static void ProbeLocalizationTable(ManualLogSource log)
+        {
+            // Former SD_LAN_LAN was merged into SD_LAN_MAIN (cate/cn/en; dict key = complex name).
+            var gone = Type.GetType("SD_LAN_LAN, Assembly-CSharp");
+            var main = typeof(SD_LAN_MAIN);
+            if (gone != null)
+                log.LogWarning("[Compat] SD_LAN_LAN still present (unexpected)");
+            if (main.GetField("cn") == null || main.GetField("en") == null || main.GetField("cate") == null)
+                log.LogError("[Compat] SD_LAN_MAIN missing cate/cn/en — LanLocalization broken");
+            else if (main.GetField("key") != null)
+                log.LogInfo("[Compat] SD_LAN_MAIN still has key field (legacy layout)");
+            else
+                log.LogInfo("[Compat] SD_LAN_MAIN cate/cn/en OK (LAN UI table)");
+        }
+
+        private static void ProbeEndTurnApi(ManualLogSource log)
+        {
+            var mi = typeof(GameAPI).GetMethod(
+                "MannualEndTurn",
+                BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+            if (mi == null)
+                log.LogError("[Compat] GameAPI.MannualEndTurn MISSING — EndTurn Accept broken");
+            else
+                log.LogInfo("[Compat] GameAPI.MannualEndTurn found (" +
+                           (mi.IsPublic ? "public" : "non-public") + ")");
         }
 
         private static void ProbePlayerControl(ManualLogSource log)

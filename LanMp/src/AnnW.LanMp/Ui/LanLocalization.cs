@@ -5,8 +5,10 @@ using UnityEngine;
 namespace AnnW.LanMp.Ui
 {
     /// <summary>
-    /// Registers LanMp UI strings into the game's <see cref="SD_LAN_LAN"/> table and binds
+    /// Registers LanMp UI strings into the game's <see cref="SD_LAN_MAIN"/> table and binds
     /// <see cref="Localized_Txt"/> the same way vanilla menu buttons do (cate + key → LAN.Get).
+    /// Game update: former <c>SD_LAN_LAN</c> merged into <c>SD_LAN_MAIN</c> (no <c>key</c> field;
+    /// dictionary id is the complex name <c>cate_key</c>).
     /// </summary>
     internal static class LanLocalization
     {
@@ -31,14 +33,14 @@ namespace AnnW.LanMp.Ui
 
         public static void EnsureRegistered()
         {
-            UpsertLan(ComplexKeyLobby, Cate, KeyLobby, CnLobby, EnLobby);
-            UpsertLan(Cate + "_" + KeyHost, Cate, KeyHost, "创建房间", "Create Room");
-            UpsertLan(Cate + "_" + KeyJoin, Cate, KeyJoin, "加入房间", "Join Room");
-            UpsertLan(Cate + "_" + KeyReady, Cate, KeyReady, "准备", "Ready");
-            UpsertLan(Cate + "_" + KeyStart, Cate, KeyStart, "开始战斗", "Start Battle");
-            UpsertLan(Cate + "_" + KeyLeave, Cate, KeyLeave, "离开房间", "Leave");
-            UpsertLan(Cate + "_" + KeyClose, Cate, KeyClose, "关闭", "Close");
-            UpsertLan(Cate + "_LanMp_Room", Cate, "LanMp_Room", "联机房间", "LAN Room");
+            UpsertLan(ComplexKeyLobby, Cate, CnLobby, EnLobby);
+            UpsertLan(Cate + "_" + KeyHost, Cate, "创建房间", "Create Room");
+            UpsertLan(Cate + "_" + KeyJoin, Cate, "加入房间", "Join Room");
+            UpsertLan(Cate + "_" + KeyReady, Cate, "准备", "Ready");
+            UpsertLan(Cate + "_" + KeyStart, Cate, "开始战斗", "Start Battle");
+            UpsertLan(Cate + "_" + KeyLeave, Cate, "离开房间", "Leave");
+            UpsertLan(Cate + "_" + KeyClose, Cate, "关闭", "Close");
+            UpsertLan(Cate + "_LanMp_Room", Cate, "联机房间", "LAN Room");
 
             if (!_logged)
             {
@@ -107,22 +109,21 @@ namespace AnnW.LanMp.Ui
             }
         }
 
-        private static void UpsertLan(string complexKey, string cate, string key, string cn, string en)
+        private static void UpsertLan(string complexKey, string cate, string cn, string en)
         {
-            SD_LAN_LAN entry;
-            if (SDBase<SD_LAN_LAN>.Has(complexKey, alert: false))
+            SD_LAN_MAIN entry;
+            if (SDBase<SD_LAN_MAIN>.Has(complexKey, alert: false))
             {
-                entry = SDBase<SD_LAN_LAN>.Get(complexKey, alert: false);
+                entry = SDBase<SD_LAN_MAIN>.Get(complexKey, alert: false);
             }
             else
             {
-                entry = new SD_LAN_LAN();
-                SDBase<SD_LAN_LAN>.dic[complexKey] = entry;
+                entry = new SD_LAN_MAIN();
+                SDBase<SD_LAN_MAIN>.dic[complexKey] = entry;
             }
 
             entry.name = complexKey;
             entry.cate = cate;
-            entry.key = key;
             entry.cn = cn;
             entry.en = en;
         }

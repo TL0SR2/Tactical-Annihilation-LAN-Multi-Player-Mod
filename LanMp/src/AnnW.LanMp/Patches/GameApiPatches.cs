@@ -248,7 +248,10 @@ namespace AnnW.LanMp.Patches
         }
     }
 
-    [HarmonyPatch(typeof(GameAPI), nameof(GameAPI.MannualEndTurn))]
+    /// <summary>
+    /// Game update: <c>MannualEndTurn</c> is private — patch by name, not <c>nameof</c>.
+    /// </summary>
+    [HarmonyPatch(typeof(GameAPI), "MannualEndTurn")]
     internal static class Patch_MannualEndTurn
     {
         private static bool Prefix()

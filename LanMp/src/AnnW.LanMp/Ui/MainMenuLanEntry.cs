@@ -8,7 +8,7 @@ using UnityEngine.UI;
 namespace AnnW.LanMp.Ui
 {
     /// <summary>
-    /// Injects「多人联机大厅」into main-menu Skirmish submenu using vanilla Localized_Txt + SD_LAN_LAN.
+    /// Injects「多人联机大厅」into main-menu Skirmish submenu using vanilla Localized_Txt + SD_LAN_MAIN.
     /// </summary>
     internal static class MainMenuLanEntry
     {
@@ -22,7 +22,11 @@ namespace AnnW.LanMp.Ui
             if (menu == null || menu.pop_skirmish == null)
                 return;
 
-            LanLocalization.EnsureRegistered();
+            try { LanLocalization.EnsureRegistered(); }
+            catch (System.Exception ex)
+            {
+                LanMpPlugin.Log?.LogError("[UI] LanLocalization.EnsureRegistered failed: " + ex);
+            }
 
             var pop = menu.pop_skirmish;
             if (!_dumpedOnce)
@@ -54,7 +58,7 @@ namespace AnnW.LanMp.Ui
             var anchor = FindLowestButton(pop, template);
             PlaceBelow(anchor.transform as RectTransform, clone.transform as RectTransform);
 
-            // Keep Localized_Txt; retarget cate/key to our SD_LAN_LAN row (do not Destroy localization).
+            // Keep Localized_Txt; retarget cate/key to our SD_LAN_MAIN row (do not Destroy localization).
             LanLocalization.BindLobbyButton(clone);
 
             var btn = clone.GetComponent<Button>() ?? clone.GetComponentInChildren<Button>(true);

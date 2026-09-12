@@ -2072,7 +2072,14 @@ namespace AnnW.LanMp.Sync
                 return;
             }
             _log.LogInfo("[Sync] Host applying EndTurn (local TurnLoop)");
-            GameAPI.self.MannualEndTurn();
+            // Game update: MannualEndTurn is private — invoke via AccessTools.
+            var mi = AccessTools.Method(typeof(GameAPI), "MannualEndTurn");
+            if (mi == null)
+            {
+                _log.LogError("[Sync] GameAPI.MannualEndTurn missing after game update");
+                return;
+            }
+            mi.Invoke(GameAPI.self, null);
         }
 
         private void ApplyCommandLocallyImmediate(CommandDto cmd, bool fromOptimistic)
