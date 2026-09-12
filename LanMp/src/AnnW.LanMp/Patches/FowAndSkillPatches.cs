@@ -19,6 +19,9 @@ namespace AnnW.LanMp.Patches
         {
             private static void Prefix()
             {
+                // INV-SOLO: ApplyLocalViewBinding no-ops outside InLanBattle; keep call cheap.
+                if (!GateUtil.LanArmed(out _))
+                    return;
                 LanMpPlugin.Instance?.Authority?.ApplyLocalViewBinding("turn-started-bus");
             }
         }
@@ -30,21 +33,29 @@ namespace AnnW.LanMp.Patches
 
             private static bool Prefix(ref bool __state)
             {
-                // Nested Postfix must NOT clear the outer guard (bool flag was wrong).
-                if (_depth > 0)
+                // INV-SOLO + CO skills (INV-15): nested TriggerFOWDirty bodies must always run
+                // (Telle / Skill_Spawn nest FOW during cast). The EndTurn→Guest freeze was from
+                // rebinding last_human_player mid-nested re-entry — not from nested FOW itself.
+                var lan = GateUtil.LanArmed(out _);
+                var nested = _depth > 0;
+                if (!SoloIsolationRules.AllowNestedFowDirtyBody(lan, nested))
                 {
                     __state = false;
                     return false;
                 }
+
+                if (SoloIsolationRules.ShouldApplyLocalViewOnFowDirty(lan, nested))
+                    LanMpPlugin.Instance?.Authority?.ApplyLocalViewBinding("fow-dirty");
+
                 _depth++;
-                __state = true;
-                LanMpPlugin.Instance?.Authority?.ApplyLocalViewBinding("fow-dirty");
+                // Outer entry only: FowDirtyDone trace + owns depth pairing.
+                __state = !nested;
                 return true;
             }
 
             private static void Postfix(bool __state)
             {
-                if (__state && _depth > 0)
+                if (_depth > 0)
                     _depth--;
                 if (__state)
                     BattleSyncTrace.Ev("FowDirtyDone");
@@ -75,6 +86,8 @@ namespace AnnW.LanMp.Patches
         {
             private static bool Prefix()
             {
+                if (!GateUtil.LanArmed(out _))
+                    return true;
                 // Host Accept CastSkill calls SetUXState_Skill under SkillCastSuppressEmit
                 // while Host spectates the remote seat — must run vanilla (INV-17).
                 if (GateUtil.AllowApplyDrivenVanillaBody())
@@ -96,6 +109,8 @@ namespace AnnW.LanMp.Patches
         {
             private static bool Prefix(ActionData skill)
             {
+                if (!GateUtil.LanArmed(out var plugin))
+                    return true;
                 if (GateUtil.AllowApplyDrivenVanillaBody())
                     return true;
                 if (SyncContext.SuppressNetworkEmit)
@@ -103,31 +118,29 @@ namespace AnnW.LanMp.Patches
                     GateUtil.Toast("请稍候");
                     return false;
                 }
-                if (!GateUtil.LanArmed(out var plugin))
-                    return true;
                 if (GateUtil.ShouldBlockUx(out var reason))
                 {
                     GateUtil.Toast(reason);
                     return false;
                 }
 
-            if (plugin.Net.Role == PeerRole.Guest)
-            {
-                if (!GateUtil.GuestMayEmitIntent(plugin))
+                if (plugin.Net.Role == PeerRole.Guest)
                 {
-                    return !GateUtil.IsBattlePlayPhase();
+                    if (!GateUtil.GuestMayEmitIntent(plugin))
+                    {
+                        return !GateUtil.IsBattlePlayPhase();
+                    }
+                    var intent = plugin.Sync.BuildIntent("CastSkill");
+                    if (skill?.sd_skill != null)
+                        intent.extrasJson = skill.sd_skill.name;
+                    plugin.Sync.SubmitIntent(intent, guestOptimisticApply: false);
+                    return false;
                 }
-                var intent = plugin.Sync.BuildIntent("CastSkill");
-                if (skill?.sd_skill != null)
-                    intent.extrasJson = skill.sd_skill.name;
-                plugin.Sync.SubmitIntent(intent, guestOptimisticApply: false);
-                return false;
-            }
 
-            if (plugin.Net.Role == PeerRole.Host)
-                plugin.Sync.NoteHostSkillCastTarget(null);
+                if (plugin.Net.Role == PeerRole.Host)
+                    plugin.Sync.NoteHostSkillCastTarget(null);
 
-            return true;
+                return true;
             }
         }
 
@@ -136,6 +149,8 @@ namespace AnnW.LanMp.Patches
         {
             private static bool Prefix(GameTileData lt)
             {
+                if (!GateUtil.LanArmed(out var plugin))
+                    return true;
                 if (GateUtil.AllowApplyDrivenVanillaBody())
                     return true;
                 if (SyncContext.SuppressNetworkEmit)
@@ -143,8 +158,6 @@ namespace AnnW.LanMp.Patches
                     GateUtil.Toast("请稍候");
                     return false;
                 }
-                if (!GateUtil.LanArmed(out var plugin))
-                    return true;
                 if (GateUtil.ShouldBlockUx(out var reason))
                 {
                     GateUtil.Toast(reason);
@@ -177,12 +190,16 @@ namespace AnnW.LanMp.Patches
         {
             private static bool Prefix(UI_SkillBtn __instance)
             {
+                // INV-SOLO: never intercept skill clicks outside LAN battle.
+                if (!GateUtil.LanArmed(out _))
+                    return true;
+
                 if (GateUtil.IsSpectating())
                     return false; // silent — button should already be hidden
 
                 if (!GateUtil.ShouldBlockUx(out var reason))
                 {
-                    // Empty skill_action NRE guard (loadout miss / no-CO seats).
+                    // Empty skill_action NRE guard (loadout miss / no-CO seats) — LAN only.
                     try
                     {
                         var co = GS_Battle.self?.cur_player?.co_data;
@@ -205,6 +222,10 @@ namespace AnnW.LanMp.Patches
         {
             private static bool Prefix(UI_SkillBtn __instance)
             {
+                // INV-SOLO: do not mutate energy_max / hide buttons in solo/campaign.
+                if (!GateUtil.LanArmed(out _))
+                    return true;
+
                 try
                 {
                     if (GateUtil.IsSpectating())
@@ -337,6 +358,7 @@ namespace AnnW.LanMp.Patches
                             return false;
                         }
                     }
+                    // INV-SOLO: Suppress/Applying flags must not alter CreateUnit outside LAN.
                     return true;
                 }
 
@@ -382,12 +404,15 @@ namespace AnnW.LanMp.Patches
         /// <summary>
         /// Belt-and-suspenders: never let LifeTime OnEffectEnd Die during Guest attach rebinds.
         /// Real Host expiry still runs (no ApplyingRemoteCommand). Silent EffectHost clear is primary.
+        /// INV-SOLO: never swallow OnEffectEnd outside LAN (would strand LifeTime summons).
         /// </summary>
         [HarmonyPatch(typeof(UnitEffect_LifeTime), "OnEffectEnd")]
         private static class Patch_LifeTime_OnEffectEnd
         {
             private static bool Prefix()
             {
+                if (!GateUtil.LanArmed(out _))
+                    return true;
                 if (SyncContext.ApplyingRemoteCommand)
                     return false;
                 return true;

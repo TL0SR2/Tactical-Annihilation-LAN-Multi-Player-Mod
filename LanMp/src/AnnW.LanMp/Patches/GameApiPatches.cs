@@ -746,6 +746,9 @@ namespace AnnW.LanMp.Patches
 
         private static bool Prefix()
         {
+            // INV-SOLO: PresentationSkip is Guest CastSkill VFX only — never skip cells in solo.
+            if (!GateUtil.LanArmed(out _))
+                return true;
             return !SyncContext.PresentationSkipActionCell;
         }
     }

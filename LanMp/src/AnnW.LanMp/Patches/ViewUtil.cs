@@ -108,15 +108,32 @@ namespace AnnW.LanMp.Patches
 
         /// <summary>
         /// FOW fraction for ActionData.CanDoAction / GetEffectZone.
-        /// UX: INV-VIEW local viewer for own/ally. Host Accept: PreferUnitOwnerFow → owner map
-        /// (authoritative SEEN; never soft-pass TARGET_NOT_VISIBLE).
+        /// INV-SOLO: outside LAN must match vanilla <c>action.player.fraction</c> exactly.
+        /// LAN unit-bound: INV-VIEW via <see cref="GetMoveZoneFowFraction"/>.
+        /// LAN unbound (CO skills): always caster <c>action.player</c> — never local spectator
+        /// FOW (Host Accept Guest cast / Guest presenting Host cast both need caster FOW).
         /// </summary>
         internal static Fraction GetActionUxFowFraction(ActionData action, GS_Battle battle)
         {
+            if (!GateUtil.LanArmed(out _))
+            {
+                // Exact vanilla: AcquireFOWMap(player.fraction) — never owner / cur_player.
+                return action?.player != null
+                    ? action.player.fraction
+                    : Fraction.NEUTRAL;
+            }
+
             if (action?.owner != null)
                 return GetMoveZoneFowFraction(action.owner, battle);
-            if (AnnW.LanMp.Sync.SyncContext.PreferUnitOwnerFowForMoveZone)
-                return action?.player != null ? action.player.fraction : Fraction.NEUTRAL;
+
+            // PreferUnitOwner Accept path + CO / unbound skills (owner null).
+            if (action?.player != null)
+            {
+                var local = GetUxViewFraction(battle);
+                return (Fraction)SoloIsolationRules.UnboundActionFowFraction(
+                    (int)action.player.fraction, (int)local);
+            }
+
             return GetUxViewFraction(battle);
         }
 

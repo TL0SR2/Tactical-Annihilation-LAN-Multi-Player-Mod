@@ -61,6 +61,25 @@ namespace AnnW.LanMp.Sync
         /// </summary>
         public static bool HostEndTurnAcceptWaiting { get; set; }
 
+        /// <summary>
+        /// INV-SOLO: clear all battle-scoped flags when leaving LAN so stuck Suppress /
+        /// PresentationSkip / PreferUnitOwner cannot poison solo/campaign.
+        /// </summary>
+        public static void ResetBattleScopedFlags()
+        {
+            SuppressNetworkEmit = false;
+            ApplyingRemoteCommand = false;
+            InApplyEnumerator = false;
+            ForcedUnitId = null;
+            AllowForcedCreate = false;
+            PreferUnitOwnerFowForMoveZone = false;
+            AllowVanillaEndGameUi = false;
+            PresentationSkipActionCell = false;
+            InHostTurnSafePump = false;
+            SkillCastSuppressEmit = false;
+            HostEndTurnAcceptWaiting = false;
+        }
+
         public static IDisposable BeginRemoteApply()
         {
             return new Scope(remote: true);

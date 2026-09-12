@@ -239,8 +239,15 @@ namespace AnnW.LanMp.Patches
                     (__instance.is_auto_guiding && __instance.auto_guide_skip_animations))
                     result = false;
 
+                // During Host Accept / Host local CastSkill, VFX gates must use the casting
+                // seat's FOW (cur_player), not the local spectator's INV-VIEW map.
+                var observeFrac = AnnW.LanMp.Sync.SyncContext.SkillCastSuppressEmit &&
+                                  __instance.cur_player != null
+                    ? __instance.cur_player.fraction
+                    : ViewUtil.GetUxViewFraction(__instance);
+
                 if (!__instance.functions.Querry(GAME_FUNCTION.NoFOW) &&
-                    !GameAPI.self.GetFOWMap(ViewUtil.GetUxViewFraction(__instance)).CanSeeUnit(pos))
+                    !GameAPI.self.GetFOWMap(observeFrac).CanSeeUnit(pos))
                     result = false;
 
                 __result = result;

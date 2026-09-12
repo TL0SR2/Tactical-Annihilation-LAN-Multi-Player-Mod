@@ -11,10 +11,12 @@
 **插件对策（已落地）：**
 - `ApplyLocalViewBinding` 强制 `last_human_player = LocalHuman`，并校正 `is_player_in_control`
 - Harmony：`GetDisplayPlayer`、`GetDisplayFraction`
-- 在 `TriggerPlayerTurnStarted` / `TriggerFOWDirty` **Prefix** 重绑（赶在 UI/FOW 监听前）
+- 在 `TriggerPlayerTurnStarted` / **最外层** `TriggerFOWDirty` Prefix 重绑（赶在 UI/FOW 监听前）
+- **嵌套 FOWDirty 本体一律放行**（CO 技能施放会嵌套刷新）；禁止再用「LAN 嵌套 return false」挡技能
 - PrepareBattle / 回合事件仍调用绑定
+- 无 `owner` 的 CO `CanDoAction`/`GetEffectZone`：联机也用施法方 `action.player` FOW（Accept/远端演出）
 
-**验收：** Guest 在 Host/AI 回合应始终只见本阵营迷雾，不应「开全图」或看到 Host 视野。
+**验收：** Guest 在 Host/AI 回合应始终只见本阵营迷雾，不应「开全图」或看到 Host 视野；Host/Guest 施放召唤类 CO 技能（如 Telle）时棋盘与 VFX 正常。
 
 ## 指挥官技能
 

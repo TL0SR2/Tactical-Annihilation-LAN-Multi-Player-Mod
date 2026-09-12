@@ -80,6 +80,7 @@ namespace AnnW.LanMp.Authority
             _net.OnPeerDisconnected -= OnPeerDisconnected;
             GatesArmed = false;
             InLanBattle = false;
+            SyncContext.ResetBattleScopedFlags();
             _lanBattleSceneEntered = false;
             MatchSettled = false;
             LastMatchEnd = null;
@@ -186,6 +187,7 @@ namespace AnnW.LanMp.Authority
             {
                 UnhookBattleEvents();
                 InLanBattle = false;
+                SyncContext.ResetBattleScopedFlags();
                 _lanBattleSceneEntered = false;
                 GatesArmed = false;
             }
@@ -457,6 +459,7 @@ namespace AnnW.LanMp.Authority
 
             // Stay in battle scene for vanilla EndGame UI; LAN gates off so Prefix allows it.
             InLanBattle = false;
+            SyncContext.ResetBattleScopedFlags();
             _lanBattleSceneEntered = false;
 
             // Close any LAN room/lobby chrome immediately — must not cover MissionEnd / LevelSummary.
@@ -558,6 +561,7 @@ namespace AnnW.LanMp.Authority
             BattleSyncTrace.EndBattleSession("MatchAbort:" + reason);
             UnhookBattleEvents();
             InLanBattle = false;
+            SyncContext.ResetBattleScopedFlags();
             _lanBattleSceneEntered = false;
             GatesArmed = false;
             PendingBattleId = null;

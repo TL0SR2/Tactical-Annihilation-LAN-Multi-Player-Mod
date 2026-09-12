@@ -187,6 +187,8 @@ namespace AnnW.LanMp.Patches
             {
                 try
                 {
+                    if (!LanCoSelectActive())
+                        return true;
                     var parent = __instance.parent;
                     if (parent == null || !parent.for_skirmish)
                         return true;
@@ -211,7 +213,7 @@ namespace AnnW.LanMp.Patches
         {
             private static void Postfix(UI_CO_Select_Info __instance, bool for_skirmish)
             {
-                if (!for_skirmish || __instance == null)
+                if (!for_skirmish || __instance == null || !LanCoSelectActive())
                     return;
                 try
                 {
@@ -236,6 +238,8 @@ namespace AnnW.LanMp.Patches
             {
                 try
                 {
+                    if (!LanCoSelectActive())
+                        return;
                     if (__instance?.parent != null && __instance.parent.for_skirmish)
                         __instance.data_source = UI_CO_Select_Info.DATA_SOURCE.CUSTOM;
                 }
@@ -243,11 +247,26 @@ namespace AnnW.LanMp.Patches
             }
         }
 
+        /// <summary>INV-SOLO: CO/PS overrides only while LAN room / start / seat seed is live.</summary>
+        private static bool LanCoSelectActive()
+        {
+            var plugin = LanMpPlugin.Instance;
+            if (plugin == null || plugin.Enabled == null || !plugin.Enabled.Value)
+                return false;
+            return SoloIsolationRules.AllowLanCoSelectOverrides(
+                pluginEnabled: true,
+                lanRoomOpen: LanRoomPanel.IsOpen,
+                startAuthorized: plugin.Lobby != null && plugin.Lobby.StartAuthorized,
+                seatSeedActive: _seedActive);
+        }
+
         [HarmonyPatch(typeof(UI_POP_SK_Select), nameof(UI_POP_SK_Select.ShowSKSselect))]
         private static class Patch_ShowSKSelect
         {
             private static void Postfix(UI_POP_SK_Select __instance)
             {
+                if (!LanCoSelectActive())
+                    return;
                 LanDropMenu.BringFloaterPopupToFront(__instance);
             }
         }
@@ -257,6 +276,8 @@ namespace AnnW.LanMp.Patches
         {
             private static void Postfix(UI_POP_PS_Select __instance)
             {
+                if (!LanCoSelectActive())
+                    return;
                 LanDropMenu.BringFloaterPopupToFront(__instance);
             }
         }
