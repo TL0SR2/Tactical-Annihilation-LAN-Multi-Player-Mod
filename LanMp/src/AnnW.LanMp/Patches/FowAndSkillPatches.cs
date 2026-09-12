@@ -75,8 +75,15 @@ namespace AnnW.LanMp.Patches
         {
             private static bool Prefix()
             {
-                if (SyncContext.ApplyingRemoteCommand || SyncContext.SuppressNetworkEmit)
+                // Host Accept CastSkill calls SetUXState_Skill under SkillCastSuppressEmit
+                // while Host spectates the remote seat — must run vanilla (INV-17).
+                if (GateUtil.AllowApplyDrivenVanillaBody())
                     return true;
+                if (SyncContext.SuppressNetworkEmit)
+                {
+                    GateUtil.Toast("请稍候");
+                    return false;
+                }
                 if (!GateUtil.ShouldBlockUx(out var reason))
                     return true;
                 GateUtil.Toast(reason);
@@ -89,8 +96,13 @@ namespace AnnW.LanMp.Patches
         {
             private static bool Prefix(ActionData skill)
             {
-                if (SyncContext.ApplyingRemoteCommand || SyncContext.SuppressNetworkEmit)
+                if (GateUtil.AllowApplyDrivenVanillaBody())
                     return true;
+                if (SyncContext.SuppressNetworkEmit)
+                {
+                    GateUtil.Toast("请稍候");
+                    return false;
+                }
                 if (!GateUtil.LanArmed(out var plugin))
                     return true;
                 if (GateUtil.ShouldBlockUx(out var reason))
@@ -103,9 +115,6 @@ namespace AnnW.LanMp.Patches
             {
                 if (!GateUtil.GuestMayEmitIntent(plugin))
                 {
-                    // Allow setup / remote apply through; otherwise swallow (no Intent spam).
-                    if (SyncContext.ApplyingRemoteCommand || SyncContext.SuppressNetworkEmit)
-                        return true;
                     return !GateUtil.IsBattlePlayPhase();
                 }
                 var intent = plugin.Sync.BuildIntent("CastSkill");
@@ -127,8 +136,13 @@ namespace AnnW.LanMp.Patches
         {
             private static bool Prefix(GameTileData lt)
             {
-                if (SyncContext.ApplyingRemoteCommand || SyncContext.SuppressNetworkEmit)
+                if (GateUtil.AllowApplyDrivenVanillaBody())
                     return true;
+                if (SyncContext.SuppressNetworkEmit)
+                {
+                    GateUtil.Toast("请稍候");
+                    return false;
+                }
                 if (!GateUtil.LanArmed(out var plugin))
                     return true;
                 if (GateUtil.ShouldBlockUx(out var reason))
@@ -140,11 +154,7 @@ namespace AnnW.LanMp.Patches
                 if (plugin.Net.Role == PeerRole.Guest)
                 {
                     if (!GateUtil.GuestMayEmitIntent(plugin))
-                    {
-                        if (SyncContext.ApplyingRemoteCommand || SyncContext.SuppressNetworkEmit)
-                            return true;
                         return !GateUtil.IsBattlePlayPhase();
-                    }
                     var pos = lt != null ? lt.pos : Inctor2.Zero;
                     var skill = GS_Battle.self?.selected_skill ?? GS_Battle.self?.cur_player?.co_data?.skill_action;
                     var intent = plugin.Sync.BuildIntent("CastSkill", target: lt != null ? pos : (Inctor2?)null);

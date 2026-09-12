@@ -35,6 +35,32 @@ namespace AnnW.LanMp.Tests
         }
 
         [Theory]
+        [InlineData(false, false, false, false, true)]
+        [InlineData(true, false, false, false, false)]
+        [InlineData(true, true, false, false, true)]
+        [InlineData(true, false, true, false, true)]
+        [InlineData(true, false, false, true, true)]
+        public void AllowApplyDrivenVanillaBody_cases(
+            bool mp, bool applying, bool inEnum, bool skill, bool expected)
+        {
+            Assert.Equal(expected, InputGateRules.AllowApplyDrivenVanillaBody(mp, applying, inEnum, skill));
+        }
+
+        [Theory]
+        [InlineData(false, true, false, false, false)]
+        [InlineData(true, false, false, false, false)]
+        [InlineData(true, true, false, false, true)]
+        [InlineData(true, false, true, false, true)]
+        [InlineData(true, true, false, true, false)]
+        [InlineData(true, false, true, true, false)]
+        public void ShouldBlockUxForAuthoritative_cases(
+            bool mp, bool suppress, bool applying, bool skill, bool expected)
+        {
+            Assert.Equal(expected,
+                InputGateRules.ShouldBlockUxForAuthoritative(mp, suppress, applying, skill));
+        }
+
+        [Theory]
         [InlineData(false, false, true)]
         [InlineData(false, true, true)]
         [InlineData(true, false, false)]

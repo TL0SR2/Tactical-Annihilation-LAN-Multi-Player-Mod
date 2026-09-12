@@ -32,6 +32,17 @@ namespace AnnW.LanMp.Patches
         internal static bool IsAuthoritativeExecution()
             => SyncContext.ApplyingRemoteCommand || SyncContext.SuppressNetworkEmit;
 
+        /// <summary>
+        /// Undo / CastSkill may fall through when Apply or skill cast owns the call.
+        /// Suppress-only (foreign Accept) must toast-block — see INV-17.
+        /// </summary>
+        internal static bool AllowApplyDrivenVanillaBody()
+            => InputGateRules.AllowApplyDrivenVanillaBody(
+                LanArmed(out _),
+                SyncContext.ApplyingRemoteCommand,
+                SyncContext.InApplyEnumerator,
+                SyncContext.SkillCastSuppressEmit);
+
         /// <summary>When false, Prefixes should capture Intent / block UX instead of running vanilla.</summary>
         internal static bool ShouldRunVanillaBody()
             => InputGateRules.ShouldRunOriginal(LanArmed(out _), IsAuthoritativeExecution());
@@ -116,6 +127,19 @@ namespace AnnW.LanMp.Patches
                 return false;
             if (!IsBattlePlayPhase())
                 return false;
+            // Host Accept CastSkill drives SetUX/proc while cur_player is remote — must not
+            // spectate-block Accept (INV-17). SkillCastSuppressEmit is independent of Suppress.
+            if (SyncContext.SkillCastSuppressEmit)
+                return false;
+            // ApplyQueue / remote apply: silent (vanilla spectate style).
+            if (SyncContext.ApplyingRemoteCommand)
+                return true;
+            // Host Accept Suppress for a different command: toast-block player clicks.
+            if (SyncContext.SuppressNetworkEmit)
+            {
+                reason = "请稍候";
+                return true;
+            }
             if (plugin.Checksum != null && plugin.Checksum.MismatchPaused)
             {
                 reason = "状态校验暂停中";
@@ -404,8 +428,16 @@ namespace AnnW.LanMp.Patches
     {
         private static bool Prefix()
         {
-            if (SyncContext.SuppressNetworkEmit || SyncContext.ApplyingRemoteCommand)
+            // Host instant Accept / Guest Apply set ApplyingRemoteCommand — run vanilla undo.
+            // Suppress alone (CoHostAcceptAnimated for UnitMoved/DoAction) must NOT fall through:
+            // click-undo would mutate locally while Bus is silenced (INV-17).
+            if (GateUtil.AllowApplyDrivenVanillaBody())
                 return true;
+            if (SyncContext.SuppressNetworkEmit)
+            {
+                GateUtil.Toast("请稍候");
+                return false;
+            }
             if (!GateUtil.LanArmed(out var plugin))
                 return true;
             var battle = GS_Battle.self;

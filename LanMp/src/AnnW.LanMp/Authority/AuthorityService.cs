@@ -50,7 +50,6 @@ namespace AnnW.LanMp.Authority
 
         private bool _abortApplied;
         private bool _openLobbyAfterAbort;
-        private bool _openLobbyAfterSettlement;
         /// <summary>Host: drop guests one tick after MatchEnd send so payload can land first.</summary>
         private bool _deferredDropPeersAfterMatchEnd;
         /// <summary>
@@ -84,7 +83,6 @@ namespace AnnW.LanMp.Authority
             _lanBattleSceneEntered = false;
             MatchSettled = false;
             LastMatchEnd = null;
-            _openLobbyAfterSettlement = false;
             _deferredDropPeersAfterMatchEnd = false;
         }
 
@@ -95,15 +93,11 @@ namespace AnnW.LanMp.Authority
                 _deferredDropPeersAfterMatchEnd = false;
                 try
                 {
-                    if (_net.Role == PeerRole.Host)
-                    {
-                        _net.DropAllPeersKeepHosting("match-end");
-                        // notifyLobby=false on drop — reconcile here so Open is not the only path.
-                        try { _lobby.ReconcileSeatsToConnectedPeers(); }
-                        catch (Exception ex) { _log.LogWarning("[Authority] post-MatchEnd reconcile: " + ex.Message); }
-                    }
-                    else if (_net.IsConnected)
+                    // Exit room entirely (both roles) — settlement UI only; no KeepHosting room chrome.
+                    if (_net.Role != PeerRole.None)
                         _net.Disconnect("match-end");
+                    try { _lobby.ResetDraftOccupancyKeepMap(); }
+                    catch (Exception ex) { _log.LogWarning("[Authority] post-MatchEnd draft reset: " + ex.Message); }
                 }
                 catch (Exception ex)
                 {
@@ -131,27 +125,8 @@ namespace AnnW.LanMp.Authority
                 }
             }
 
-            if (_openLobbyAfterSettlement)
-            {
-                _openLobbyAfterSettlement = false;
-                try
-                {
-                    if (_net.Role == PeerRole.Host)
-                    {
-                        try { _lobby.ReconcileSeatsToConnectedPeers(); }
-                        catch (Exception ex) { _log.LogWarning("[Authority] seat reconcile: " + ex.Message); }
-                        LanRoomPanel.Open();
-                    }
-                    else
-                        LanLobbyNativePanel.Open();
-                }
-                catch (Exception ex)
-                {
-                    _log.LogWarning("[Authority] reopen lobby after settlement: " + ex.Message);
-                }
-
-                // Settlement uses vanilla EndGame UI — do not open custom IMGUI (triggers BepInEx console).
-            }
+            // INV: never open room/lobby over vanilla EndGame while still in Battle.
+            // Settlement exit = disconnect room; user returns via DoQuitOut → Menu only.
 
             if (!InLanBattle || !GatesArmed)
                 return;
@@ -392,6 +367,14 @@ namespace AnnW.LanMp.Authority
             var resultArr = results.ToArray();
             LanPlayerNames.StampResultDisplayNames(resultArr);
 
+            // Host settlement truth for Guest PageStat / curve / history (INV MatchEnd attachment).
+            MatchSettlementAttachment settlement = null;
+            try { settlement = MatchSettlementBridge.Capture(_log); }
+            catch (Exception ex)
+            {
+                _log.LogWarning("[Authority] MatchEnd settlement capture: " + ex.Message);
+            }
+
             var pld = new MatchEndPayload
             {
                 // Legacy Host-seat EndGame(bool) only — ResolveLocalVictory ignores this for Guests.
@@ -400,7 +383,10 @@ namespace AnnW.LanMp.Authority
                 reason = reason ?? "",
                 battleId = _lobby.BattleId ?? "",
                 winnerFraction = winnerFrac,
-                results = resultArr
+                results = resultArr,
+                settlementJson = MatchSettlementCodec.HasPayload(settlement)
+                    ? MatchSettlementCodec.ToJson(settlement)
+                    : null
             };
 
             // Deliver payload while the link still works; peers may disconnect immediately after.
@@ -464,13 +450,33 @@ namespace AnnW.LanMp.Authority
             PendingBattleId = null;
             _lobby.ClearBattleAuthorization();
 
-            // Defer TCP drop one tick — MatchEnd bytes must reach Guests first.
+            // Defer TCP teardown one tick — MatchEnd bytes must reach Guests first.
+            // Full Disconnect (not KeepHosting): leave room; settlement UI only.
             if (dropPeers)
                 _deferredDropPeersAfterMatchEnd = true;
 
             // Stay in battle scene for vanilla EndGame UI; LAN gates off so Prefix allows it.
             InLanBattle = false;
             _lanBattleSceneEntered = false;
+
+            // Close any LAN room/lobby chrome immediately — must not cover MissionEnd / LevelSummary.
+            try
+            {
+                LanRoomPanel.Close();
+                LanLobbyNativePanel.Close();
+                LanLobbyPanel.Close();
+            }
+            catch (Exception ex)
+            {
+                _log.LogWarning("[Authority] close lobby UI for settlement: " + ex.Message);
+            }
+
+            // Stamp Host statics/turn_snaps before proc_EndGame (Guest has empty local ledgers).
+            try { MatchSettlementBridge.ApplyFromMatchEnd(end, _log); }
+            catch (Exception ex)
+            {
+                _log.LogWarning("[Authority] MatchEnd settlement stamp: " + ex.Message);
+            }
 
             try
             {
@@ -507,8 +513,7 @@ namespace AnnW.LanMp.Authority
                 SyncContext.AllowVanillaEndGameUi = false;
             }
 
-            // After vanilla returns to menu, reopen LAN lobby (Host room / Guest panel).
-            _openLobbyAfterSettlement = true;
+            // Do NOT reopen LanRoom / lobby over settlement — user exits via vanilla DoQuitOut → Menu.
             _log.LogInfo(
                 $"[Authority] Match settlement localVictory={LastLocalVictory} — vanilla EndGame, deferDrop={dropPeers}");
         }
@@ -762,6 +767,15 @@ namespace AnnW.LanMp.Authority
             // Settled MatchEnd already left battle / may drop peers — not an abort.
             if (MatchSettled)
                 return;
+
+            // Host MatchEnd teardown Disconnect may race ahead of MatchEnd Pump Apply.
+            // Do not Abort/toast「主机已离开」or LoadMenu — MatchEnd in queue still settles UI.
+            if (reason != null &&
+                reason.Equals("match-end", StringComparison.OrdinalIgnoreCase))
+            {
+                _log.LogInfo("[Authority] disconnect match-end while unsettle — await MatchEnd Apply");
+                return;
+            }
 
             if (!InLanBattle && !_abortApplied)
             {

@@ -21,6 +21,42 @@ namespace AnnW.LanMp.Protocol
         }
 
         /// <summary>
+        /// Fallthrough for Intent-capture Prefixes whose Accept body is driven by
+        /// <c>ApplyingRemoteCommand</c> / apply enumerator / skill cast — <em>not</em>
+        /// Suppress-only (that flag may belong to a different Accept command).
+        /// Use for Undo / CastSkill UX. MannualEndTurn Accept uses Suppress-only entry —
+        /// check Suppress||Applying directly. Surrender/RestartLevel: never fall through.
+        /// </summary>
+        public static bool AllowApplyDrivenVanillaBody(
+            bool multiplayerActive,
+            bool applyingRemoteCommand,
+            bool inApplyEnumerator,
+            bool skillCastInProgress)
+        {
+            if (!multiplayerActive)
+                return true;
+            return applyingRemoteCommand || inApplyEnumerator || skillCastInProgress;
+        }
+
+        /// <summary>
+        /// Player UX while Accept holds Suppress for a <em>different</em> command must block
+        /// (toast), not mutate under a silenced Bus. Skill-cast Accept keeps this false so
+        /// SetUX/proc run while Host spectates the remote seat.
+        /// </summary>
+        public static bool ShouldBlockUxForAuthoritative(
+            bool multiplayerActive,
+            bool suppressNetworkEmit,
+            bool applyingRemoteCommand,
+            bool skillCastInProgress)
+        {
+            if (!multiplayerActive)
+                return false;
+            if (skillCastInProgress)
+                return false;
+            return suppressNetworkEmit || applyingRemoteCommand;
+        }
+
+        /// <summary>
         /// Xingyi <c>InputGate.MaySubmit</c> analogue: local seat may emit Intent (Guest) or
         /// drive Host-local apply entry only when it is their act window and we are not
         /// already inside authoritative execution.

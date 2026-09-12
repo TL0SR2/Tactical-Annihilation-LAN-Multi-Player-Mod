@@ -237,6 +237,13 @@ namespace AnnW.LanMp.Ui
         private static void OnNetDisconnected(string reason)
         {
             var plugin = LanMpPlugin.Instance;
+            // MatchEnd already closed room + deferred Disconnect — stay on settlement UI only.
+            if (plugin?.Authority != null && plugin.Authority.MatchSettled)
+            {
+                Close();
+                LanMpPlugin.Log?.LogInfo("[RoomUI] match settled disconnect (no lobby reopen): " + reason);
+                return;
+            }
             // Host keeps room when guest drops (listener still up).
             if (plugin?.Net.Role == PeerRole.Host)
             {

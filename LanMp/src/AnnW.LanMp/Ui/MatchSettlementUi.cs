@@ -4,7 +4,8 @@ namespace AnnW.LanMp.Ui
 {
     /// <summary>
     /// Legacy MatchEnd cache hook. Settlement presentation is vanilla <c>proc_EndGame</c>
-    /// (<c>SyncContext.AllowVanillaEndGameUi</c>). Do not draw IMGUI — it triggers BepInEx console.
+    /// (<c>SyncContext.AllowVanillaEndGameUi</c>) after <c>MatchSettlementBridge</c> stamps Host
+    /// statics/turn_snaps. Do not draw IMGUI — it triggers BepInEx console. Do not reopen LAN room.
     /// </summary>
     internal static class MatchSettlementUi
     {

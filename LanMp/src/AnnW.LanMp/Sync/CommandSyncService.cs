@@ -122,6 +122,9 @@ namespace AnnW.LanMp.Sync
             _guestOptimisticDone.Clear();
             _presentationAheadMoveKeys.Clear();
             ClearGuestAwait();
+            SyncContext.HostEndTurnAcceptWaiting = false;
+            SyncContext.SkillCastSuppressEmit = false;
+            SyncContext.SuppressNetworkEmit = false;
         }
 
         public void Tick(float dt)
@@ -149,6 +152,9 @@ namespace AnnW.LanMp.Sync
                 _guestOptimisticDone.Clear();
                 _presentationAheadMoveKeys.Clear();
                 ClearGuestAwait();
+                SyncContext.HostEndTurnAcceptWaiting = false;
+                SyncContext.SkillCastSuppressEmit = false;
+                SyncContext.SuppressNetworkEmit = false;
             }
         }
 
@@ -282,10 +288,14 @@ namespace AnnW.LanMp.Sync
                 return;
             if (_authority == null || !_authority.InLanBattle)
                 return;
-            if (!_net.IsConnected)
+            if (!_net.IsConnected || _net.ConnectedPeerCount == 0)
             {
-                AbortHostSkillCastWatchdog("not-connected", nackGuest: true);
-                FailBroadcastAfterApply("CastSkill", "not-connected");
+                // Guest left mid-cast: clear suppress — do NOT AbortMatch as broadcast-failed
+                // (same false positive as Bus ShouldEmitFromBus / 0.19.6 toast regression).
+                var hadGuestIntent = _pendingSkillCommand != null &&
+                                     !string.IsNullOrEmpty(_pendingSkillCommand.sourceIntentId);
+                AbortHostSkillCastWatchdog("not-connected", nackGuest: hadGuestIntent);
+                _log.LogInfo("[Sync] CastSkill done — no guests; skip broadcast (no Abort)");
                 return;
             }
 
@@ -652,10 +662,11 @@ namespace AnnW.LanMp.Sync
                 return false;
             if (_net.Role != PeerRole.Host)
                 return false;
-            // Host UX/AI already mutated locally; if peer is gone, Guest never gets Command.
-            if (!_net.IsConnected)
+            // Solo Host after Guest left: skip emit — do NOT AbortMatch as broadcast-failed
+            // (0.19.6 false positive when peer quits mid-AI / mid-turn).
+            if (!_net.IsConnected || _net.ConnectedPeerCount == 0)
             {
-                FailBroadcastAfterApply("bus", "not-connected");
+                _log.LogInfo("[Sync] Bus emit skipped — no connected guests");
                 return false;
             }
             return true;
@@ -1370,46 +1381,67 @@ namespace AnnW.LanMp.Sync
 
         private IEnumerator CoHostAcceptEndTurn(CommandDto intentCmd)
         {
-            // Host EndTurn is authoritative TurnLoop — Suppress only.
-            // ApplyingRemoteCommand here conflates "local sim" with "Guest replay" and poisons
-            // StartPlayerTurn / CreateUnit / FOW paths during the transition.
-            SyncContext.SuppressNetworkEmit = true;
+            // Host EndTurn Accept (INV-T9 Suppress-only for MannualEndTurn entry).
+            // Dual-timeout tradeoff: turn-span wait for EndTurnReady stays unbounded, but
+            // SuppressNetworkEmit must NOT span that wait — StartPlayerTurn FOW/OnTurnStart/
+            // unit StartTurn (and later AI Bus) would be silenced → Guest never sees actions
+            // or EndTurn (0.19.6 regression). Ownership of EndTurn Command uses
+            // HostEndTurnAcceptWaiting instead.
             TurnAuth?.ConsumePendingEndTurn();
+            SyncContext.HostEndTurnAcceptWaiting = true;
             BattleSyncTrace.Ev("EndTurnAcceptBegin",
                 kind: "EndTurn",
                 intentId: intentCmd?.sourceIntentId,
                 turn: GS_Battle.self != null ? GS_Battle.self.turns : (int?)null,
                 curPlayer: GS_Battle.self?.cur_player != null ? GS_Battle.self.cur_player.index : (int?)null);
-            ApplyEndTurnHostLocal();
-            BattleSyncTrace.Ev("EndTurnMannualStarted",
-                kind: "EndTurn",
-                turn: GS_Battle.self != null ? GS_Battle.self.turns : (int?)null,
-                curPlayer: GS_Battle.self?.cur_player != null ? GS_Battle.self.cur_player.index : (int?)null);
-            // CRITICAL: CoroutineObject treats yield null as same-frame spin — must use float wait
-            // or TurnLoop never gets Update and EndTurnReady can never arrive (Host white-screen).
-            // Turn-span wait (INV dual timeout): next StartPlayerTurn may follow a long AI/SafePump
-            // chain — do NOT reuse Apply's 45s hang budget (same class of bug as RemoteWatch 600s).
-            while (TurnAuth != null && !TurnAuth.EndTurnReady)
+            try
             {
-                if (!_authority.InLanBattle || _authority.MatchSettled)
-                    break;
-                yield return AnnWCoroutine.NextTick;
-            }
-            SyncContext.SuppressNetworkEmit = false;
+                SyncContext.SuppressNetworkEmit = true;
+                try
+                {
+                    // Prefix sees Suppress → runs vanilla MannualEndTurn (no re-SubmitIntent).
+                    ApplyEndTurnHostLocal();
+                }
+                finally
+                {
+                    SyncContext.SuppressNetworkEmit = false;
+                }
 
-            var ready = TurnAuth?.ConsumePendingEndTurn();
-            if (ready == null)
-            {
-                _log.LogError("[Sync] Host EndTurn Accept — TurnAuthority produced no EndTurn");
-                FailBroadcastAfterApply("EndTurn", "no-turn-auth");
-                yield break;
+                BattleSyncTrace.Ev("EndTurnMannualStarted",
+                    kind: "EndTurn",
+                    turn: GS_Battle.self != null ? GS_Battle.self.turns : (int?)null,
+                    curPlayer: GS_Battle.self?.cur_player != null ? GS_Battle.self.cur_player.index : (int?)null);
+
+                // CRITICAL: CoroutineObject treats yield null as same-frame spin — must use float wait
+                // or TurnLoop never gets Update and EndTurnReady can never arrive (Host white-screen).
+                while (TurnAuth != null && !TurnAuth.EndTurnReady)
+                {
+                    if (!_authority.InLanBattle || _authority.MatchSettled)
+                        break;
+                    yield return AnnWCoroutine.NextTick;
+                }
+
+                var ready = TurnAuth?.ConsumePendingEndTurn();
+                if (ready == null)
+                {
+                    _log.LogError("[Sync] Host EndTurn Accept — TurnAuthority produced no EndTurn");
+                    FailBroadcastAfterApply("EndTurn", "no-turn-auth");
+                    yield break;
+                }
+                ready.sourceIntentId = intentCmd.sourceIntentId;
+                // Outbound pump attaches + sends after NextTick (same INV as AI bus EndTurn).
+                HostBroadcastCommand(ready);
+                BattleSyncTrace.EvCommand("EndTurnAcceptBroadcast", ready);
+                _log.LogInfo(
+                    $"[Sync] Host EndTurn Accept broadcast ended={ready.endedPlayerIndex}→{ready.nextPlayerIndex}");
             }
-            ready.sourceIntentId = intentCmd.sourceIntentId;
-            // Outbound pump attaches + sends after NextTick (same INV as AI bus EndTurn).
-            HostBroadcastCommand(ready);
-            BattleSyncTrace.EvCommand("EndTurnAcceptBroadcast", ready);
-            _log.LogInfo(
-                $"[Sync] Host EndTurn Accept broadcast ended={ready.endedPlayerIndex}→{ready.nextPlayerIndex}");
+            finally
+            {
+                SyncContext.HostEndTurnAcceptWaiting = false;
+                SyncContext.SuppressNetworkEmit = false;
+                try { TurnAuth?.TryEmitDeferredEndTurnIfReady(); }
+                catch { /* ignore */ }
+            }
         }
 
         private IEnumerator CoHostAcceptAnimated(CommandDto cmd)
@@ -1577,7 +1609,8 @@ namespace AnnW.LanMp.Sync
 
         /// <summary>
         /// Mark seat defeated, clear army (sync-friendly), spectate path via TriggerPlayerDefeat.
-        /// If last opposing faction, SkirmishLogic → EndGame → MatchEnd + vanilla settlement.
+        /// MatchEnd only when LAN skirmish has ≤1 living faction (see <c>SkirmishEndRules</c>) —
+        /// allied AI / remote humans keep fighting; vanilla "no humans left" hotseat end is skipped.
         /// </summary>
         public void HostApplySurrender(Player seat, string sourceIntentId)
         {

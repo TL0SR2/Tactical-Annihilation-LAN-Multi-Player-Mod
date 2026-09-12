@@ -161,22 +161,26 @@ namespace AnnW.LanMp.Authority
             BattleSyncTrace.EvCommand("EndTurnReady", cmd);
 
             // When not suppressed, Sync will broadcast via event (captures board there).
-            // SkillCastSuppressEmit alone must also defer — AI skill mid-turn must not drop EndTurn.
-            if (!SyncContext.SuppressNetworkEmit && !SyncContext.SkillCastSuppressEmit)
+            // SkillCastSuppressEmit / HostEndTurnAcceptWaiting defer — Accept owns that EndTurn.
+            if (!SyncContext.SuppressNetworkEmit &&
+                !SyncContext.SkillCastSuppressEmit &&
+                !SyncContext.HostEndTurnAcceptWaiting)
                 OnHostEndTurnReady?.Invoke(cmd);
         }
 
         /// <summary>
-        /// After skill suppress clears: emit EndTurn that was deferred while SkillCastSuppressEmit.
-        /// Accept SuppressNetworkEmit still blocks (INV-T9).
+        /// After skill / Accept-waiting clears: emit EndTurn that was deferred.
+        /// Accept path Consumes itself — this only helps skill-boundary deferrals.
         /// </summary>
         public void TryEmitDeferredEndTurnIfReady()
         {
             if (!EndTurnReady || PendingEndTurnCommand == null)
                 return;
-            if (SyncContext.SuppressNetworkEmit || SyncContext.SkillCastSuppressEmit)
+            if (SyncContext.SuppressNetworkEmit ||
+                SyncContext.SkillCastSuppressEmit ||
+                SyncContext.HostEndTurnAcceptWaiting)
                 return;
-            _log.LogInfo("[TurnAuth] Emit deferred EndTurn after skill suppress");
+            _log.LogInfo("[TurnAuth] Emit deferred EndTurn after suppress clear");
             OnHostEndTurnReady?.Invoke(PendingEndTurnCommand);
         }
 

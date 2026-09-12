@@ -96,6 +96,11 @@ namespace AnnW.LanMp.Protocol
         public string battleId;
         public int winnerFraction = -1;
         public SeatMatchResultDto[] results;
+        /// <summary>
+        /// Host settlement snapshot JSON (<see cref="MatchSettlementAttachment"/>).
+        /// Required for Guest PageStat / curve / history — board Apply never records statics/snaps.
+        /// </summary>
+        public string settlementJson;
     }
 
     public class StateHashDto

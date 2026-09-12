@@ -954,12 +954,18 @@ namespace AnnW.LanMp.Protocol
 
                     if (env.Type == MsgType.Disconnect)
                     {
+                        // Enqueue first so MatchEnd ahead in this burst can be Pumped before teardown
+                        // handlers run. Preserve Host reason (e.g. match-end) for Authority.
                         _incoming.Enqueue(env);
-                        endReason = null;
-                        if (Role == PeerRole.Host)
-                            DropPeerKeepHosting(peer, "remote-disconnect");
-                        else
-                            Disconnect("remote-disconnect");
+                        var why = "remote-disconnect";
+                        try
+                        {
+                            var p = JsonUtil.FromJson<DisconnectPayload>(env.PayloadJson);
+                            if (p != null && !string.IsNullOrEmpty(p.reason))
+                                why = p.reason;
+                        }
+                        catch { /* ignore */ }
+                        endReason = why;
                         break;
                     }
 

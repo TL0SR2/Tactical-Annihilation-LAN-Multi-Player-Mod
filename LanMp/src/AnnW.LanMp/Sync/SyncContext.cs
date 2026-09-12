@@ -53,6 +53,14 @@ namespace AnnW.LanMp.Sync
         /// </summary>
         public static bool SkillCastSuppressEmit { get; set; }
 
+        /// <summary>
+        /// Host EndTurn Accept owns the next EndTurn Command broadcast (Consume + HostBroadcast).
+        /// Must NOT hold <see cref="SuppressNetworkEmit"/> across the turn-span wait for
+        /// <c>EndTurnReady</c> — that silenced Bus UnitMoved/DoAction for the whole AI/FOW
+        /// StartPlayerTurn prologue (0.19.6 dual-timeout regression).
+        /// </summary>
+        public static bool HostEndTurnAcceptWaiting { get; set; }
+
         public static IDisposable BeginRemoteApply()
         {
             return new Scope(remote: true);

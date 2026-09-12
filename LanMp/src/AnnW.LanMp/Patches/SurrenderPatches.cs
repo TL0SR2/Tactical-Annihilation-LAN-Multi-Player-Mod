@@ -1,16 +1,15 @@
-using System.Collections.Generic;
 using AnnW.LanMp.Protocol;
 using AnnW.LanMp.Sync;
-using AnnW.LanMp.Ui;
 using ANNW;
 using HarmonyLib;
 
 namespace AnnW.LanMp.Patches
 {
     /// <summary>
-    /// LAN surrender → seat defeat + spectate (same path as wipe-out), not EndGame(false).
-    /// Vanilla <c>SS_ANNW_Game.Surrender</c> only calls EndGame — Guest was a no-op; Host
-    /// wrongly ended the whole match without marking defeated.
+    /// LAN surrender → seat defeat + spectate (same path as wipe-out), never vanilla
+    /// <c>Surrender</c> which is only <c>EndGame(false)</c>.
+    /// Must not <c>return true</c> under Suppress/Applying — that re-enabled hotseat EndGame
+    /// while allied humans still fight (Host surrender regression).
     /// </summary>
     internal static class SurrenderPatches
     {
@@ -19,12 +18,17 @@ namespace AnnW.LanMp.Patches
         {
             private static bool Prefix()
             {
-                if (SyncContext.ApplyingRemoteCommand || SyncContext.SuppressNetworkEmit)
-                    return true;
                 if (!GateUtil.LanArmed(out var plugin))
                     return true;
                 if (plugin.Authority.MatchSettled)
                     return false;
+
+                // LAN: never fall through to vanilla Surrender (= EndGame(false)).
+                if (SyncContext.ApplyingRemoteCommand)
+                {
+                    GateUtil.Toast("请稍候再投降");
+                    return false;
+                }
 
                 var local = plugin.Authority.TryGetLocalHumanPlayer();
                 if (local == null)
@@ -55,11 +59,13 @@ namespace AnnW.LanMp.Patches
 
                 if (plugin.Net.Role == PeerRole.Host)
                 {
+                    // Seat wipe + spectate even if Accept Suppress is held (pause menu).
                     plugin.Sync.HostApplySurrender(local, sourceIntentId: null);
                     return false;
                 }
 
-                return true;
+                // Role.None while gates armed — still block vanilla EndGame.
+                return false;
             }
         }
     }
