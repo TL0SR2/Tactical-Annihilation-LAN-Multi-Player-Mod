@@ -55,96 +55,108 @@ namespace AnnW.LanMp.Sync
             var guard = 0f;
             var label = string.IsNullOrEmpty(tag) ? "pump" : tag;
             var bounded = !float.IsInfinity(timeoutSec) && timeoutSec > 0f;
-
-            while (stack.Count > 0 && (!bounded || guard < timeoutSec))
+            SyncContext.CoroutineSafeWrapDepth++;
+            try
             {
-                var top = stack.Peek();
-                bool moved;
-                object cur = null;
-                SyncContext.InApplyEnumerator = true;
-                try
+                while (stack.Count > 0 && (!bounded || guard < timeoutSec))
                 {
-                    moved = top.MoveNext();
-                    if (moved)
-                        cur = top.Current;
-                }
-                catch (Exception ex)
-                {
+                    var top = stack.Peek();
+                    bool moved;
+                    object cur = null;
+                    SyncContext.InApplyEnumerator = true;
+                    try
+                    {
+                        moved = top.MoveNext();
+                        if (moved)
+                            cur = top.Current;
+                    }
+                    catch (Exception ex)
+                    {
+                        SyncContext.InApplyEnumerator = false;
+                        // Drain stack — do not leave half-finished vanilla skill/move enumerators
+                        // alive for CoroutineObject (NRE in ExecuteContext after Nullable/.Value).
+                        stack.Clear();
+                        log?.LogWarning("[Coroutine] SafePump " + label + ": " + ex.Message);
+                        yield break;
+                    }
                     SyncContext.InApplyEnumerator = false;
-                    log?.LogWarning("[Coroutine] SafePump " + label + ": " + ex.Message);
-                    yield break;
-                }
-                SyncContext.InApplyEnumerator = false;
 
-                if (!moved)
-                {
-                    stack.Pop();
-                    continue;
-                }
-
-                // Nested enumerator: flatten here — never yield IEnumerator to CoroutineObject.
-                if (cur is IEnumerator nested)
-                {
-                    stack.Push(nested);
-                    continue;
-                }
-
-                if (bounded)
-                    guard += Time.unscaledDeltaTime;
-
-                if (cur is float f)
-                {
-                    // Vanilla CoroutineObject: any float yield returns to Update — including 0.
-                    if (f <= 0f)
+                    if (!moved)
                     {
-                        yield return NextTick;
+                        stack.Pop();
                         continue;
                     }
 
-                    var waited = 0f;
-                    while (waited < f && (!bounded || guard < timeoutSec))
+                    // Nested enumerator: flatten here — never yield IEnumerator to CoroutineObject.
+                    if (cur is IEnumerator nested)
                     {
-                        waited += Time.unscaledDeltaTime;
-                        if (bounded)
-                            guard += Time.unscaledDeltaTime;
-                        yield return NextTick;
-                    }
-                    continue;
-                }
-
-                if (cur is int ii)
-                {
-                    // Vanilla move/attack animators yield boxed int 0 each lerp frame
-                    // (UnitData.proc_MoveAnimation, DoAction_*). Treating 0 as "wait 0s"
-                    // without yielding busy-completes the whole path in one ApplyQueue
-                    // MoveNext → Guest teleport / missing attack VFX (INV-T10 regression).
-                    if (ii <= 0)
-                    {
-                        yield return NextTick;
+                        stack.Push(nested);
                         continue;
                     }
 
-                    var waited = 0f;
-                    var limit = (float)ii;
-                    while (waited < limit && (!bounded || guard < timeoutSec))
+                    if (bounded)
+                        guard += Time.unscaledDeltaTime;
+
+                    if (cur is float f)
                     {
-                        waited += Time.unscaledDeltaTime;
-                        if (bounded)
-                            guard += Time.unscaledDeltaTime;
-                        yield return NextTick;
+                        // Vanilla CoroutineObject: any float yield returns to Update — including 0.
+                        if (f <= 0f)
+                        {
+                            yield return NextTick;
+                            continue;
+                        }
+
+                        var waited = 0f;
+                        while (waited < f && (!bounded || guard < timeoutSec))
+                        {
+                            waited += Time.unscaledDeltaTime;
+                            if (bounded)
+                                guard += Time.unscaledDeltaTime;
+                            yield return NextTick;
+                        }
+                        continue;
                     }
-                    continue;
+
+                    if (cur is int ii)
+                    {
+                        // Vanilla move/attack animators yield boxed int 0 each lerp frame
+                        // (UnitData.proc_MoveAnimation, DoAction_*). Treating 0 as "wait 0s"
+                        // without yielding busy-completes the whole path in one ApplyQueue
+                        // MoveNext → Guest teleport / missing attack VFX (INV-T10 regression).
+                        if (ii <= 0)
+                        {
+                            yield return NextTick;
+                            continue;
+                        }
+
+                        var waited = 0f;
+                        var limit = (float)ii;
+                        while (waited < limit && (!bounded || guard < timeoutSec))
+                        {
+                            waited += Time.unscaledDeltaTime;
+                            if (bounded)
+                                guard += Time.unscaledDeltaTime;
+                            yield return NextTick;
+                        }
+                        continue;
+                    }
+
+                    // null or unsupported YieldInstruction-like objects → never busy-spin.
+                    yield return NextTick;
                 }
 
-                // null or unsupported YieldInstruction-like objects → never busy-spin.
-                yield return NextTick;
+                if (bounded && stack.Count > 0)
+                {
+                    log?.LogWarning(
+                        $"[Coroutine] SafePump timeout tag={label} after {timeoutSec:0}s " +
+                        $"(stack={stack.Count}) — releasing caller");
+                }
             }
-
-            if (bounded && stack.Count > 0)
+            finally
             {
-                log?.LogWarning(
-                    $"[Coroutine] SafePump timeout tag={label} after {timeoutSec:0}s " +
-                    $"(stack={stack.Count}) — releasing caller");
+                if (SyncContext.CoroutineSafeWrapDepth > 0)
+                    SyncContext.CoroutineSafeWrapDepth--;
+                SyncContext.InApplyEnumerator = false;
             }
         }
     }

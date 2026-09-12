@@ -186,8 +186,12 @@ namespace AnnW.LanMp.Presentation
         }
 
         /// <summary>
-        /// Guest CastSkill presentation (ADR-003 R4 / M07 B7) — same visual path as Host
-        /// <c>CO_Data.proc_CastSkill</c> (DoActionAni / VFX), without AfterSkillCast / DoActionCell.
+        /// Guest CastSkill presentation (ADR-003 R4 / M07 B7).
+        /// Must NOT run vanilla <c>DoActionAni</c>: PrepareAction does <c>AutoSetPos().Value</c>
+        /// on null tile (Nullable crash) and MultiTarget/Parallel spawn sibling
+        /// <c>CoroutineObject.StartCoroutine</c> that <c>yield null</c> — poisons
+        /// <c>SS_ANNW_Game.Update</c> (NRE / soft-lock). Board truth is Host attachment;
+        /// Guest only plays safe VFX + bus cast cues.
         /// </summary>
         internal static IEnumerator CoKickSkillCastVisual(CommandDto cmd, ManualLogSource log = null)
         {
@@ -214,7 +218,6 @@ namespace AnnW.LanMp.Presentation
                 caster = battle?.cur_player;
 
             var co = caster?.co_data;
-            // Host may stamp extrasJson = skill SD name — rebind if Guest CO skill_action drifted.
             if (co != null && !string.IsNullOrEmpty(cmd?.extrasJson) &&
                 (co.skill_action == null ||
                  co.skill == null ||
@@ -236,66 +239,14 @@ namespace AnnW.LanMp.Presentation
                 }
             }
 
-            if (co?.skill_action == null)
-            {
-                try { BattleEventBus.self.TriggerSkillCastDone(); }
-                catch { /* ignore */ }
-                yield break;
-            }
-
-            GameTileData tile = null;
-            try
-            {
-                if (cmd != null && cmd.hasTarget && GameAPI.self != null)
-                    tile = GameAPI.self.GetTile(new Inctor2(cmd.targetX, cmd.targetY));
-            }
-            catch { tile = null; }
-
-            // Vanilla proc_CastSkill does NOT show pop_skillcast text — only DoActionAni VFX.
-            // Skip LanMp text banner; run Ani with PresentationSkipActionCell (no DoActionCell).
+            // Safe VFX only — never DoActionAni / nested CoroutineObject skill procs.
             var prevSkip = SyncContext.PresentationSkipActionCell;
             SyncContext.PresentationSkipActionCell = true;
             try
             {
-                try { AccessTools.Field(typeof(ActionData), "cached_select_zone")?.SetValue(co.skill_action, null); }
-                catch { /* ignore */ }
-
-                IEnumerator primary = null;
-                try { primary = co.skill_action.DoActionAni(tile, false); }
-                catch (Exception ex)
-                {
-                    log?.LogWarning("[Presentation] skill DoActionAni: " + ex.Message);
-                }
-                if (primary != null)
-                {
-                    yield return AnnWCoroutine.SafePump(
-                        primary, AnnWCoroutine.DefaultApplyTimeoutSec, log, "GuestSkillAni");
-                }
-
-                var extras = co.skill_actions;
-                if (extras != null)
-                {
-                    for (var i = 1; i < extras.Count; i++)
-                    {
-                        var act = extras[i];
-                        if (act == null)
-                            continue;
-                        try { AccessTools.Field(typeof(ActionData), "cached_select_zone")?.SetValue(act, null); }
-                        catch { /* ignore */ }
-                        IEnumerator more = null;
-                        try { more = act.DoActionAni(tile, false); }
-                        catch (Exception ex)
-                        {
-                            log?.LogWarning("[Presentation] skill_actions[" + i + "] Ani: " + ex.Message);
-                        }
-                        if (more != null)
-                        {
-                            yield return AnnWCoroutine.SafePump(
-                                more, AnnWCoroutine.DefaultApplyTimeoutSec, log,
-                                "GuestSkillAni:" + i);
-                        }
-                    }
-                }
+                TryPlaySkillCastVfx(co?.skill_action, cmd, log);
+                // One tick so FOW/UI can breathe before attach stamps the board.
+                yield return AnnWCoroutine.NextTick;
             }
             finally
             {
@@ -306,6 +257,47 @@ namespace AnnW.LanMp.Presentation
             catch (Exception ex)
             {
                 log?.LogWarning("[Presentation] SkillCastDone: " + ex.Message);
+            }
+        }
+
+        private static void TryPlaySkillCastVfx(ActionData skill, CommandDto cmd, ManualLogSource log)
+        {
+            if (skill?.sd_action == null || cmd == null || !cmd.hasTarget)
+                return;
+
+            Inctor2 pos;
+            try { pos = new Inctor2(cmd.targetX, cmd.targetY); }
+            catch { return; }
+
+            try
+            {
+                var battle = GS_Battle.self;
+                if (battle == null)
+                    return;
+                var canSee = true;
+                if (CanObserveMethod != null)
+                    canSee = (bool)CanObserveMethod.Invoke(battle, new object[] { pos });
+                if (!canSee)
+                    return;
+
+                var getWp = AccessTools.Method(typeof(SS_ANNW_Game), "GetWP", new[] { typeof(Inctor2) });
+                if (getWp == null)
+                    return;
+                var wp = (Vector3)getWp.Invoke(null, new object[] { pos });
+                var vfx = SingletonMonoAuto<VFX>.self;
+                if (vfx == null)
+                    return;
+
+                var vfxGlobal = skill.sd_action.vfx_global;
+                if (!string.IsNullOrEmpty(vfxGlobal))
+                    vfx.CreateVFX(vfxGlobal, wp, null, null);
+                var vfxHit = skill.sd_action.vfx_hit;
+                if (!string.IsNullOrEmpty(vfxHit))
+                    vfx.CreateVFX(vfxHit, wp, null, null);
+            }
+            catch (Exception ex)
+            {
+                log?.LogWarning("[Presentation] skill VFX: " + ex.Message);
             }
         }
 
@@ -321,9 +313,30 @@ namespace AnnW.LanMp.Presentation
             }
         }
 
+        private static readonly MethodInfo GetEffectZoneMi = FindGetEffectZone();
+
+        private static MethodInfo FindGetEffectZone()
+        {
+            var mi = AccessTools.Method(typeof(ActionData), "GetEffectZone",
+                new[] { typeof(Inctor2), typeof(Inctor2?), typeof(bool) });
+            if (mi != null)
+                return mi;
+            // Fallback: any GetEffectZone(Inctor2, ...)
+            foreach (var m in AccessTools.GetDeclaredMethods(typeof(ActionData)))
+            {
+                if (m == null || m.Name != "GetEffectZone")
+                    continue;
+                var ps = m.GetParameters();
+                if (ps.Length >= 1 && ps[0].ParameterType == typeof(Inctor2))
+                    return m;
+            }
+            return AccessTools.Method(typeof(ActionData), "GetEffectZone");
+        }
+
         /// <summary>
         /// Fire weapon/mesh action presentation without DoActionCell (no RNG / spawn).
         /// Returns seconds the caller should yield on AnnW CoroutineObject (float wait).
+        /// Single-shot only — prefer <see cref="CoKickDoActionVisual"/> for mul_tar / PARREL.
         /// </summary>
         internal static float KickDoActionVisual(
             UnitData unit,
@@ -331,19 +344,118 @@ namespace AnnW.LanMp.Presentation
             GameTileData tile,
             ManualLogSource log = null)
         {
-            if (unit == null)
-                return 0f;
-            if (cate == ActionCate.NONE || cate == ActionCate.SET_TRAIN_POS)
+            if (!TryBeginDoActionVisual(unit, cate, tile, log, out var action, out var target, out var wait))
                 return 0f;
 
-            ActionData action = null;
+            try
+            {
+                unit.in_animation = true;
+                if (target != null)
+                    unit.Event_DoActionAni?.Invoke(target, action, 0);
+            }
+            catch (Exception ex)
+            {
+                log?.LogWarning("[Presentation] Event_DoActionAni: " + ex.Message);
+            }
+
+            TryPlayActionLaunch(unit, action, target, log);
+            return wait;
+        }
+
+        /// <summary>
+        /// Attach-only DoAction presentation: loop Event_DoActionAni over GetEffectZone when
+        /// mul_tar / PARREL (vanilla DoAction_MultiTarget / DoAction_Parallel). No DoActionCell.
+        /// </summary>
+        internal static IEnumerator CoKickDoActionVisual(
+            UnitData unit,
+            ActionCate cate,
+            GameTileData tile,
+            ManualLogSource log = null)
+        {
+            if (!TryBeginDoActionVisual(unit, cate, tile, log, out var action, out var target, out var wait))
+                yield break;
+
+            var shots = ResolveDoActionAniTargets(action, target, unit, log);
+            var interval = 0.2f;
+            try
+            {
+                var settingsInterval = -1f;
+                if (action.sd_action?.settings != null && action.sd_action.settings.Has("interval"))
+                    settingsInterval = action.sd_action.settings.GetAsFloat("interval");
+                interval = PresentationRules.ResolveMultiShotInterval(shots.Count, settingsInterval);
+            }
+            catch { /* keep default */ }
+
+            try { unit.in_animation = true; }
+            catch { /* ignore */ }
+
+            for (var i = 0; i < shots.Count; i++)
+            {
+                var shotTile = shots[i];
+                if (shotTile == null)
+                    continue;
+                try { unit.Event_SetAiming?.Invoke(shotTile.pos); }
+                catch { /* ignore */ }
+
+                var shotWait = wait;
+                try
+                {
+                    if (unit.Event_GetActionTime != null)
+                    {
+                        var list = unit.Event_GetActionTime.GetInvocationList();
+                        for (var d = 0; d < list.Length; d++)
+                        {
+                            if (list[d] is Func<GameTileData, ActionData, int, float> fn)
+                                shotWait = Mathf.Max(shotWait, fn(shotTile, action, i));
+                        }
+                    }
+                }
+                catch { /* keep */ }
+                if (shotWait < 0.15f)
+                    shotWait = 0.2f;
+                if (shotWait > 2.5f)
+                    shotWait = 2.5f;
+
+                try { unit.Event_DoActionAni?.Invoke(shotTile, action, i); }
+                catch (Exception ex)
+                {
+                    log?.LogWarning("[Presentation] Event_DoActionAni[" + i + "]: " + ex.Message);
+                }
+
+                if (i == 0)
+                    TryPlayActionLaunch(unit, action, shotTile, log);
+
+                if (i + 1 < shots.Count && interval > 0.001f)
+                    yield return interval;
+                else if (i + 1 >= shots.Count && shotWait > 0.001f)
+                    yield return shotWait;
+            }
+        }
+
+        private static bool TryBeginDoActionVisual(
+            UnitData unit,
+            ActionCate cate,
+            GameTileData tile,
+            ManualLogSource log,
+            out ActionData action,
+            out GameTileData target,
+            out float wait)
+        {
+            action = null;
+            target = null;
+            wait = 0f;
+            if (unit == null)
+                return false;
+            if (cate == ActionCate.NONE || cate == ActionCate.SET_TRAIN_POS)
+                return false;
+
             try { action = unit.GetAction(cate); }
             catch (Exception ex)
             {
                 log?.LogWarning("[Presentation] GetAction: " + ex.Message);
             }
             if (action == null)
-                return 0f;
+                return false;
 
             try
             {
@@ -358,14 +470,14 @@ namespace AnnW.LanMp.Presentation
             try { unit.Event_ActionsStart?.Invoke(0, false); }
             catch { /* ignore */ }
 
-            var target = tile;
+            target = tile;
             if (target == null)
             {
                 try { target = GameTileData.Get(unit.pos); }
                 catch { target = null; }
             }
 
-            var wait = 0.35f;
+            wait = 0.35f;
             try
             {
                 if (target != null && unit.Event_GetActionTime != null)
@@ -392,23 +504,73 @@ namespace AnnW.LanMp.Presentation
                 wait = 0.35f;
             if (wait > 2.5f)
                 wait = 2.5f;
+            return true;
+        }
+
+        private static List<GameTileData> ResolveDoActionAniTargets(
+            ActionData action,
+            GameTileData primary,
+            UnitData unit,
+            ManualLogSource log)
+        {
+            var list = new List<GameTileData>();
+            if (primary != null)
+                list.Add(primary);
 
             try
             {
-                unit.in_animation = true;
-                if (target != null)
-                    unit.Event_DoActionAni?.Invoke(target, action, 0);
+                var sd = action?.sd_action;
+                if (sd == null || primary == null)
+                    return list;
+
+                var loop = PresentationRules.ShouldLoopDoActionAni(
+                    sd.mul_tar,
+                    sd.traj == TrajShape.PARREL);
+                if (!loop || GetEffectZoneMi == null)
+                    return list;
+
+                object zoneObj = null;
+                try
+                {
+                    var ps = GetEffectZoneMi.GetParameters();
+                    object[] args;
+                    if (ps.Length >= 3)
+                        args = new object[] { primary.pos, null, false };
+                    else if (ps.Length == 2)
+                        args = new object[] { primary.pos, null };
+                    else
+                        args = new object[] { primary.pos };
+                    zoneObj = GetEffectZoneMi.Invoke(action, args);
+                }
+                catch (Exception ex)
+                {
+                    log?.LogWarning("[Presentation] GetEffectZone: " + ex.Message);
+                    return list;
+                }
+
+                if (!(zoneObj is List<Inctor2> zone) || zone.Count == 0)
+                    return list;
+
+                list.Clear();
+                for (var i = 0; i < zone.Count; i++)
+                {
+                    GameTileData t = null;
+                    try { t = GameTileData.Get(zone[i]); }
+                    catch { t = null; }
+                    if (t != null)
+                        list.Add(t);
+                }
+                if (list.Count == 0 && primary != null)
+                    list.Add(primary);
             }
             catch (Exception ex)
             {
-                log?.LogWarning("[Presentation] Event_DoActionAni: " + ex.Message);
+                log?.LogWarning("[Presentation] multi-shot targets: " + ex.Message);
+                if (list.Count == 0 && primary != null)
+                    list.Add(primary);
             }
 
-            // Vanilla launch SFX lives in ActionData.PrepareAction — attach-only never calls it.
-            // Do not invoke PrepareAction (TriggerPreDoAction / zone cache side effects).
-            TryPlayActionLaunch(unit, action, target, log);
-
-            return wait;
+            return list;
         }
 
         /// <param name="cate">When set, play hit SFX (vanilla DoAction_* path skipped by attach-only).</param>

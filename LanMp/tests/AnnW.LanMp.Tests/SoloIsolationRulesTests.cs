@@ -26,11 +26,14 @@ namespace AnnW.LanMp.Tests
         }
 
         [Fact]
-        public void Unbound_co_action_fow_is_caster_not_spectator()
+        public void Unbound_co_action_fow_local_ux_vs_accept()
         {
             const int caster = 1;
             const int spectator = 0;
-            Assert.Equal(caster, SoloIsolationRules.UnboundActionFowFraction(caster, spectator));
+            Assert.Equal(spectator,
+                SoloIsolationRules.UnboundActionFowFraction(caster, spectator, hostAcceptOrPreferOwner: false));
+            Assert.Equal(caster,
+                SoloIsolationRules.UnboundActionFowFraction(caster, spectator, hostAcceptOrPreferOwner: true));
             Assert.Equal(caster, SoloIsolationRules.VanillaActionFowFraction(caster));
         }
 

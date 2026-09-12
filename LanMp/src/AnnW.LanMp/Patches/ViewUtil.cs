@@ -108,16 +108,17 @@ namespace AnnW.LanMp.Patches
 
         /// <summary>
         /// FOW fraction for ActionData.CanDoAction / GetEffectZone.
-        /// INV-SOLO: outside LAN must match vanilla <c>action.player.fraction</c> exactly.
+        /// INV-SOLO: outside LAN = vanilla <c>action.player.fraction</c>.
         /// LAN unit-bound: INV-VIEW via <see cref="GetMoveZoneFowFraction"/>.
-        /// LAN unbound (CO skills): always caster <c>action.player</c> — never local spectator
-        /// FOW (Host Accept Guest cast / Guest presenting Host cast both need caster FOW).
+        /// LAN unbound (CO skills):
+        /// - Host Accept / PreferUnitOwner → caster <c>action.player</c>
+        /// - Local UX (Guest/Host own turn select) → INV-VIEW local viewer
+        ///   (片区友军强化等可点空地；须与 RefreshLocalVision 对齐 SEEN).
         /// </summary>
         internal static Fraction GetActionUxFowFraction(ActionData action, GS_Battle battle)
         {
             if (!GateUtil.LanArmed(out _))
             {
-                // Exact vanilla: AcquireFOWMap(player.fraction) — never owner / cur_player.
                 return action?.player != null
                     ? action.player.fraction
                     : Fraction.NEUTRAL;
@@ -126,15 +127,11 @@ namespace AnnW.LanMp.Patches
             if (action?.owner != null)
                 return GetMoveZoneFowFraction(action.owner, battle);
 
-            // PreferUnitOwner Accept path + CO / unbound skills (owner null).
-            if (action?.player != null)
-            {
-                var local = GetUxViewFraction(battle);
-                return (Fraction)SoloIsolationRules.UnboundActionFowFraction(
-                    (int)action.player.fraction, (int)local);
-            }
-
-            return GetUxViewFraction(battle);
+            var accept = AnnW.LanMp.Sync.SyncContext.PreferUnitOwnerFowForMoveZone ||
+                         AnnW.LanMp.Sync.SyncContext.SkillCastSuppressEmit;
+            var caster = action?.player != null ? (int)action.player.fraction : (int)Fraction.NEUTRAL;
+            var local = (int)GetUxViewFraction(battle);
+            return (Fraction)SoloIsolationRules.UnboundActionFowFraction(caster, local, accept);
         }
 
         /// <summary>Clear attack-dot / build-planner caches for local-faction units (Guest miss StartTurn).</summary>

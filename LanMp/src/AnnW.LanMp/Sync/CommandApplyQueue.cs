@@ -121,6 +121,7 @@ namespace AnnW.LanMp.Sync
                     SyncContext.SuppressNetworkEmit = false;
                     SyncContext.ApplyingRemoteCommand = false;
                     SyncContext.InApplyEnumerator = false;
+                    SyncContext.PresentationUnlockIntent = false;
 
                     if (error != null)
                         _log?.LogError("[ApplyQueue] apply failed kind=" + cmd.kind + ": " + error);
@@ -133,6 +134,7 @@ namespace AnnW.LanMp.Sync
                 SyncContext.SuppressNetworkEmit = false;
                 SyncContext.ApplyingRemoteCommand = false;
                 SyncContext.InApplyEnumerator = false;
+                SyncContext.PresentationUnlockIntent = false;
                 _running = false;
                 bool more;
                 lock (_queue) more = _queue.Count > 0;

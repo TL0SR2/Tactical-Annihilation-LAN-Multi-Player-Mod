@@ -96,6 +96,7 @@ namespace AnnW.LanMp.Patches
                     if (plugin.Sync.TryStashGuestFollowUp(follow))
                         return false;
                 }
+                GateUtil.Toast(InputGateRules.WaitingHostConfirm);
                 return false;
             }
 

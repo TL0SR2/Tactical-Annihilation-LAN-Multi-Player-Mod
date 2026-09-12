@@ -29,10 +29,11 @@
 **插件对策（已落地）：**
 - 非己回合：挡 `SetUXState_Skill` / `UI_SkillBtn` / `proc_SkillDoAction` / `DoSkillDirectly`
 - Guest 施放：Intent `CastSkill`（**不做乐观预测**）→ Host 校验后本机施放协程 → `OnSkillCastDone` 广播 `CastSkill` + **ResultAttachment**
-- Guest 收包：**禁止重放施法**，只 Apply 附件（ADR-003）
+- Guest 收包：**禁止**重放 `DoActionAni`（`AutoSetPos().Value` / 子 `CoroutineObject` → NRE）；只 Apply 附件 + 安全 VFX（ADR-003）
+- Host Accept/本机：`SafePump(proc_SkillDoAction)`；LAN 下 `CoroutineObject.StartCoroutine` 在技能/Apply 标志时自动 SafeWrap（INV-T10）
 - Host 本机施放：同样在 `OnSkillCastDone` 广播附件
 
-**验收：** 仅己方回合可开技能；施放后两端单位/资源一致；Guest 不能本地偷放技能。
+**验收：** 仅己方回合可开技能；施放后两端单位/资源一致；Guest 不能本地偷放技能；施放后对局可继续操作（无 CoroutineObject NRE 软锁）。
 
 ## 已知缺口（2026-09-07）→ 已实现（0.19.0）
 

@@ -66,6 +66,33 @@ namespace AnnW.LanMp.Protocol
         public static bool ShouldPresentAttachOnlyDoAction(float moveDuration) =>
             !ShouldFastPresent(moveDuration, "DoAction");
 
+        /// <summary>
+        /// Host Accept DoAction should skip vanilla ExecuteAction anim so Command (with attach)
+        /// broadcasts promptly; local Event_DoActionAni is kicked after Accept without blocking.
+        /// </summary>
+        public static bool ShouldSkipHostAcceptDoActionAnim(bool suppressNetworkEmit) =>
+            suppressNetworkEmit;
+
+        /// <summary>
+        /// Mirror vanilla DoAction_MultiTarget / DoAction_Parallel shot spacing.
+        /// </summary>
+        public static float ResolveMultiShotInterval(int zoneCount, float settingsInterval)
+        {
+            if (settingsInterval > 0.001f)
+                return settingsInterval;
+            if (zoneCount > 30)
+                return 0.05f;
+            if (zoneCount > 10)
+                return 0.1f;
+            return 0.2f;
+        }
+
+        /// <summary>
+        /// mul_tar / PARREL need one Event_DoActionAni per effect tile (index &gt; 0).
+        /// </summary>
+        public static bool ShouldLoopDoActionAni(int mulTar, bool trajIsParallel) =>
+            mulTar > 0 || trajIsParallel;
+
         public static float ResolveMoveDuration(float cmdMoveDuration, float templateAniSpeed, float fallback = 0.2f)
         {
             if (ShouldFastPresent(cmdMoveDuration, "UnitMoved"))

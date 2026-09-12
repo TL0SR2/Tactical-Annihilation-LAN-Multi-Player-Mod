@@ -34,13 +34,17 @@ namespace AnnW.LanMp.Protocol
             => inLanBattle && !alreadyInsideOuterFowDirty;
 
         /// <summary>
-        /// Unbound (CO) actions: FOW = caster <c>action.player</c>, never local spectator FOW.
-        /// Host Accept Guest CastSkill / Guest presenting Host cast both need caster FOW.
+        /// Unbound CO action FOW for local UX vs Host Accept.
+        /// Local operable UX → localViewer; Accept/suppress → caster player.
         /// </summary>
-        public static int UnboundActionFowFraction(int actionPlayerFraction, int localViewerFraction)
+        public static int UnboundActionFowFraction(
+            int actionPlayerFraction,
+            int localViewerFraction,
+            bool hostAcceptOrPreferOwner)
         {
-            _ = localViewerFraction;
-            return actionPlayerFraction;
+            if (hostAcceptOrPreferOwner)
+                return actionPlayerFraction;
+            return localViewerFraction;
         }
 
         /// <summary>

@@ -102,6 +102,20 @@ namespace AnnW.LanMp.Patches
                 GateUtil.Toast(reason);
                 return false;
             }
+
+            private static void Postfix()
+            {
+                if (!GateUtil.LanArmed(out var plugin))
+                    return;
+                if (plugin.Net.Role != PeerRole.Guest && plugin.Net.Role != PeerRole.Host)
+                    return;
+                // 片区友军强化等可点空地：CanDoAction 要 SEEN；进技能时强制对齐本机 FOW。
+                try
+                {
+                    AnnW.LanMp.Presentation.RemoteTurnPresentation.RefreshLocalVision(LanMpPlugin.Log);
+                }
+                catch { /* ignore */ }
+            }
         }
 
         [HarmonyPatch(typeof(UX_Manager), nameof(UX_Manager.DoSkillDirectly))]
@@ -128,17 +142,32 @@ namespace AnnW.LanMp.Patches
                 {
                     if (!GateUtil.GuestMayEmitIntent(plugin))
                     {
+                        if (GateUtil.IsBattlePlayPhase())
+                            GateUtil.Toast(InputGateRules.WaitingHostConfirm);
                         return !GateUtil.IsBattlePlayPhase();
                     }
                     var intent = plugin.Sync.BuildIntent("CastSkill");
                     if (skill?.sd_skill != null)
                         intent.extrasJson = skill.sd_skill.name;
                     plugin.Sync.SubmitIntent(intent, guestOptimisticApply: false);
+                    try
+                    {
+                        var battle = GS_Battle.self;
+                        if (battle != null)
+                        {
+                            battle.ux_state = UX_State.NONE;
+                            battle.selected_skill = null;
+                            battle.ux_action_cate = ActionCate.NONE;
+                        }
+                        BattleEventBus.self.TriggerUXStateChanged();
+                    }
+                    catch { /* ignore */ }
+                    GateUtil.Toast("已请求释放技能…");
                     return false;
                 }
 
                 if (plugin.Net.Role == PeerRole.Host)
-                    plugin.Sync.NoteHostSkillCastTarget(null);
+                    plugin.Sync.ArmHostLocalSkillCast(null);
 
                 return true;
             }
@@ -167,21 +196,70 @@ namespace AnnW.LanMp.Patches
                 if (plugin.Net.Role == PeerRole.Guest)
                 {
                     if (!GateUtil.GuestMayEmitIntent(plugin))
+                    {
+                        if (GateUtil.IsBattlePlayPhase())
+                            GateUtil.Toast(InputGateRules.WaitingHostConfirm);
                         return !GateUtil.IsBattlePlayPhase();
-                    var pos = lt != null ? lt.pos : Inctor2.Zero;
+                    }
+                    if (lt == null)
+                    {
+                        GateUtil.Toast("请选择技能目标");
+                        return false;
+                    }
+                    var pos = lt.pos;
                     var skill = GS_Battle.self?.selected_skill ?? GS_Battle.self?.cur_player?.co_data?.skill_action;
-                    var intent = plugin.Sync.BuildIntent("CastSkill", target: lt != null ? pos : (Inctor2?)null);
+                    var intent = plugin.Sync.BuildIntent("CastSkill", target: pos);
                     if (skill?.sd_skill != null)
                         intent.extrasJson = skill.sd_skill.name;
                     plugin.Sync.SubmitIntent(intent, guestOptimisticApply: false);
+                    // Leave SKILL_SELECT so further clicks are not silent no-ops while awaiting Host.
+                    try
+                    {
+                        var battle = GS_Battle.self;
+                        if (battle != null)
+                        {
+                            battle.ux_state = UX_State.NONE;
+                            battle.selected_skill = null;
+                            battle.ux_action_cate = ActionCate.NONE;
+                        }
+                        BattleEventBus.self.TriggerUXStateChanged();
+                    }
+                    catch { /* ignore */ }
+                    GateUtil.Toast("已请求释放技能…");
                     return false;
                 }
 
-                // Host: remember tile so OnSkillCastDone Command carries orbital-strike targets etc.
+                // Host: arm SafeWrap + stamp tile before UX StartCoroutine body runs.
                 if (plugin.Net.Role == PeerRole.Host)
-                    plugin.Sync.NoteHostSkillCastTarget(lt);
+                    plugin.Sync.ArmHostLocalSkillCast(lt);
 
                 return true;
+            }
+        }
+
+        /// <summary>
+        /// Vanilla only Debug.Logs when the click is outside the skill select zone — Guest
+        /// sees a dead click (especially area buffs that allow empty tiles inside zone but
+        /// miss when FOW/select cache drifted). Toast on LAN local skill UX.
+        /// </summary>
+        [HarmonyPatch(typeof(ActionData), nameof(ActionData.IsPosInSelectZone))]
+        private static class Patch_IsPosInSelectZone_Toast
+        {
+            private static void Postfix(ActionData __instance, GameTileData gtd, bool __result)
+            {
+                if (__result || gtd == null)
+                    return;
+                if (!GateUtil.LanArmed(out _))
+                    return;
+                if (GateUtil.AllowApplyDrivenVanillaBody())
+                    return;
+                var battle = GS_Battle.self;
+                if (battle == null || battle.ux_state != UX_State.SKILL_SELECT)
+                    return;
+                if (!ReferenceEquals(battle.selected_skill, __instance) &&
+                    !ReferenceEquals(battle.cur_player?.co_data?.skill_action, __instance))
+                    return;
+                GateUtil.Toast("不在技能可选范围内");
             }
         }
 

@@ -111,6 +111,9 @@ namespace AnnW.LanMp.Patches
                 return false;
             if (Presentation.PresentationContext.ControlGrantPending)
                 return true;
+            // Attach already stamped — presentation tail must not soft-lock Guest clicks.
+            if (SyncContext.PresentationUnlockIntent)
+                return false;
             var sync = plugin.Sync;
             if (sync == null || sync.IsApplyQueueIdle)
                 return false;
@@ -131,9 +134,15 @@ namespace AnnW.LanMp.Patches
             // spectate-block Accept (INV-17). SkillCastSuppressEmit is independent of Suppress.
             if (SyncContext.SkillCastSuppressEmit)
                 return false;
-            // ApplyQueue / remote apply: silent (vanilla spectate style).
+            // ApplyQueue / remote apply: toast so Guest knows why clicks fail (not silent spectate).
+            // After attach stamp, PresentationUnlockIntent allows next Intent during VFX tail.
             if (SyncContext.ApplyingRemoteCommand)
+            {
+                if (SyncContext.PresentationUnlockIntent)
+                    return false;
+                reason = "请稍候";
                 return true;
+            }
             // Host Accept Suppress for a different command: toast-block player clicks.
             if (SyncContext.SuppressNetworkEmit)
             {
@@ -147,7 +156,7 @@ namespace AnnW.LanMp.Patches
             }
             if (IsOwnTurnSyncBusy())
             {
-                reason = null;
+                reason = "请稍候";
                 return true;
             }
             var battle = GS_Battle.self;
@@ -199,9 +208,9 @@ namespace AnnW.LanMp.Patches
                 return false;
             if (!plugin.Authority.IsLocalPlayersTurn(battle.cur_player.index))
                 return false;
-            // Block while ApplyQueue holds ApplyingRemoteCommand — early await-clear used to
-            // allow a second CastSkill before energy attach landed (Host: energy not full).
-            if (plugin.Sync != null && !plugin.Sync.IsApplyQueueIdle)
+            // After attach stamp, presentation tail may keep ApplyQueue busy — allow next Intent.
+            if (plugin.Sync != null && !plugin.Sync.IsApplyQueueIdle &&
+                !SyncContext.PresentationUnlockIntent)
                 return false;
             if (plugin.Sync != null && !plugin.Sync.GuestCanEmitIntent(out _))
                 return false;

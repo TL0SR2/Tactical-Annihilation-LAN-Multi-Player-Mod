@@ -304,13 +304,34 @@ namespace AnnW.LanMp.Patches
         [HarmonyPatch(typeof(UX_Manager), "OnWorldLeftClick_Alt", typeof(Vector3))]
         private static class Patch_UxLeftClick_Spectate
         {
-            private static bool Prefix() => !GateUtil.IsSpectating();
+            private static bool Prefix()
+            {
+                if (!GateUtil.IsSpectating())
+                    return true;
+                // Own-turn sync busy / control-grant: do not silent-swallow skill target clicks.
+                if (GateUtil.IsOwnTurnSyncBusy())
+                {
+                    GateUtil.Toast("请稍候");
+                    return false;
+                }
+                return false;
+            }
         }
 
         [HarmonyPatch(typeof(UX_Manager), "OnWorldRightClick_Alt", typeof(Vector3))]
         private static class Patch_UxRightClick_Spectate
         {
-            private static bool Prefix() => !GateUtil.IsSpectating();
+            private static bool Prefix()
+            {
+                if (!GateUtil.IsSpectating())
+                    return true;
+                if (GateUtil.IsOwnTurnSyncBusy())
+                {
+                    GateUtil.Toast("请稍候");
+                    return false;
+                }
+                return false;
+            }
         }
     }
 }

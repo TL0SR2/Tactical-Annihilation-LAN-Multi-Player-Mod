@@ -229,6 +229,20 @@ namespace AnnW.LanMp.Sync
             _log.LogInfo("[Sync] Skill cast suppress ON (" + reason + ")");
         }
 
+        /// <summary>
+        /// Host local UX: arm skill suppress + stamp target before
+        /// <c>StartCoroutine(proc_SkillDoAction)</c> so CoroutineObject SafeWrap applies.
+        /// </summary>
+        public void ArmHostLocalSkillCast(GameTileData tile)
+        {
+            if (_net.Role != PeerRole.Host)
+                return;
+            if (_authority == null || !_authority.InLanBattle)
+                return;
+            NoteHostSkillCastTarget(tile);
+            BeginSkillCastSuppress("host-local-ux");
+        }
+
         private void ClearSkillCastSuppress(string reason)
         {
             if (!_skillCastSuppressEmit && !SyncContext.SkillCastSuppressEmit)
@@ -1477,6 +1491,30 @@ namespace AnnW.LanMp.Sync
                     "HostAccept:" + (cmd.kind ?? "?"));
                 if (!ahead && cmd.kind != "EndTurn")
                     HostBroadcastCommand(cmd);
+                // Host Accept DoAction skipped anim for RTT — kick local multi-shot VFX after broadcast
+                // so Host still sees the strike while Guest receives attach (non-blocking).
+                if (cmd.kind == "DoAction" &&
+                    PresentationRules.ShouldPresentAttachOnlyDoAction(cmd.moveDuration))
+                {
+                    try
+                    {
+                        var u = ResultAttachmentBridge.FindUnit(cmd.netUnitId);
+                        var t = ResolveActionTile(cmd);
+                        var cate = (ActionCate)cmd.actionCate;
+                        if (u != null && GameController.self != null)
+                        {
+                            GameController.self.StartCoroutine(AnnWCoroutine.SafePump(
+                                ActionPresentation.CoKickDoActionVisual(u, cate, t, _log),
+                                AnnWCoroutine.DefaultApplyTimeoutSec,
+                                _log,
+                                "HostAcceptDoActionVfx"));
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        _log.LogWarning("[Sync] HostAccept DoAction VFX: " + ex.Message);
+                    }
+                }
                 // Accept suppresses Bus OnUnitMoved — drop ahead key so later moves can re-use tile.
                 if (aheadKey != null)
                     _presentationAheadMoveKeys.Remove(aheadKey);
@@ -1514,37 +1552,85 @@ namespace AnnW.LanMp.Sync
                 return false;
             }
 
+            GameTileData tile = null;
+            if (cmd.hasTarget)
+            {
+                var pos = new Inctor2(cmd.targetX, cmd.targetY);
+                tile = battle.terrain != null ? battle.terrain.GetTile(pos) : null;
+                if (tile == null && GameAPI.self != null)
+                    tile = GameAPI.self.GetTile(pos);
+                // Do NOT fall back to (0,0) — that mis-aims orbital strike / targeted skills.
+                // Null tile + vanilla PrepareAction → AutoSetPos().Value Nullable crash.
+                if (tile == null)
+                {
+                    _log.LogWarning(
+                        $"[Sync] CastSkill rejected — missing tile ({cmd.targetX},{cmd.targetY})");
+                    return false;
+                }
+            }
+
             _pendingSkillCommand = cmd;
             BeginSkillCastSuppress("guest-intent");
+            NoteHostSkillCastTarget(tile);
+            if (!string.IsNullOrEmpty(cmd.extrasJson))
+                _hostSkillExtras = cmd.extrasJson;
+
+            // INV-T10: never fire-and-forget proc_SkillDoAction on CoroutineObject.
+            // SafePump maps null→NextTick; CastDone-or-abort always clears suppress.
+            if (!TryStartCoroutine(CoHostSkillCastPipeline(cmd, tile)))
+            {
+                _pendingSkillCommand = null;
+                ClearSkillCastSuppress("guest-intent-no-host");
+                return false;
+            }
+
+            _log.LogInfo(
+                $"[Sync] Host casting skill for intent hasTarget={cmd.hasTarget} " +
+                $"({cmd.targetX},{cmd.targetY}) extras={cmd.extrasJson}");
+            return true;
+        }
+
+        /// <summary>
+        /// Host Accept CastSkill body — SafePump vanilla cast; if CastDone never fires
+        /// (Nullable / NRE inside DoActionAni), abort suppress + Nack Guest so the match
+        /// does not soft-lock until the 45s watchdog.
+        /// </summary>
+        private IEnumerator CoHostSkillCastPipeline(CommandDto cmd, GameTileData tile)
+        {
+            var ux = UX_Manager.self;
+            var battle = GS_Battle.self;
+            var co = battle?.cur_player?.co_data;
+            if (ux == null || co?.skill_action == null)
+            {
+                AbortHostSkillCastWatchdog("cast-missing-ux", nackGuest: true);
+                yield break;
+            }
+
+            IEnumerator body = null;
             try
             {
-                GameTileData tile = null;
-                if (cmd.hasTarget)
-                {
-                    var pos = new Inctor2(cmd.targetX, cmd.targetY);
-                    tile = battle.terrain != null ? battle.terrain.GetTile(pos) : null;
-                    if (tile == null && GameAPI.self != null)
-                        tile = GameAPI.self.GetTile(pos);
-                    // Do NOT fall back to (0,0) — that mis-aims orbital strike / targeted skills.
-                }
-
                 battle.selected_skill = co.skill_action;
-                NoteHostSkillCastTarget(tile);
-                if (!string.IsNullOrEmpty(cmd.extrasJson))
-                    _hostSkillExtras = cmd.extrasJson;
                 ux.SetUXState_Skill(co.skill_action);
-                ux.coroutineObject.StartCoroutine(ux.proc_SkillDoAction(tile));
-                _log.LogInfo(
-                    $"[Sync] Host casting skill for intent hasTarget={cmd.hasTarget} " +
-                    $"({cmd.targetX},{cmd.targetY}) extras={cmd.extrasJson}");
-                return true;
+                body = ux.proc_SkillDoAction(tile);
             }
             catch (Exception ex)
             {
-                _pendingSkillCommand = null;
-                ClearSkillCastSuppress("guest-intent-fail");
-                _log.LogError("[Sync] BeginHostSkillCast: " + ex);
-                return false;
+                _log.LogError("[Sync] HostSkillCast setup: " + ex);
+                AbortHostSkillCastWatchdog("cast-setup-fail", nackGuest: true);
+                yield break;
+            }
+
+            yield return AnnWCoroutine.SafePump(
+                body,
+                HostSkillCastWatchdogSec,
+                _log,
+                "HostSkillCast");
+
+            // Success path: OnSkillCastDone already ClearSkillCastSuppress + broadcast.
+            if (SyncContext.SkillCastSuppressEmit || _pendingSkillCommand != null)
+            {
+                _log.LogWarning("[Sync] Host skill cast ended without CastDone — abort");
+                AbortHostSkillCastWatchdog("cast-incomplete", nackGuest: true);
             }
         }
 
@@ -2293,7 +2379,11 @@ namespace AnnW.LanMp.Sync
 
             TryLookAtUnit(unit);
 
-            var skipAnim = PresentationRules.ShouldFastPresent(cmd.moveDuration, "DoAction");
+            // Host Accept: skip ExecuteAction anim so Command+attach broadcasts promptly (Guest lag).
+            // Local VFX kicked after Accept body without blocking broadcast (CoHostAcceptAnimated).
+            var skipAnim = PresentationRules.ShouldFastPresent(cmd.moveDuration, "DoAction")
+                           || PresentationRules.ShouldSkipHostAcceptDoActionAnim(
+                               SyncContext.SuppressNetworkEmit);
             var tile = ResolveActionTile(cmd);
             IEnumerator exec = null;
             try
@@ -2313,7 +2403,7 @@ namespace AnnW.LanMp.Sync
                 // Without this, Guest can Undo after acting and move/act again (ADR-001).
                 HostClearUndoStack("DoAction-ExecuteAction");
                 _log.LogInfo(
-                    $"[Sync] Applied DoAction(animated) unit={cmd.netUnitId} cate={cmd.actionCate} hasTarget={cmd.hasTarget}");
+                    $"[Sync] Applied DoAction(animated) unit={cmd.netUnitId} cate={cmd.actionCate} hasTarget={cmd.hasTarget} skipAnim={skipAnim}");
             }
             else
             {
@@ -2327,6 +2417,8 @@ namespace AnnW.LanMp.Sync
         /// <summary>
         /// Attach-only apply with optional visual kick (Event_DoActionAni) — no ExecuteAction / DoActionCell.
         /// Upholds ADR-001 attachment truth + ADR-003 R4 (presentation may diverge).
+        /// Stamp attach BEFORE presentation so Guest FOW (radar) + Intent unlock are timely;
+        /// VFX continues under <see cref="SyncContext.PresentationUnlockIntent"/>.
         /// </summary>
         private IEnumerator CoApplyDoActionAttachOnly(
             CommandDto cmd,
@@ -2341,19 +2433,6 @@ namespace AnnW.LanMp.Sync
 
             var skipAnim = !PresentationRules.ShouldPresentAttachOnlyDoAction(cmd.moveDuration);
             var tile = ResolveActionTile(cmd);
-            var wait = 0f;
-            if (!skipAnim)
-            {
-                wait = ActionPresentation.KickDoActionVisual(unit, cate, tile, _log);
-                if (wait > 0.001f)
-                    yield return wait;
-                // Hit SFX: vanilla plays inside DoAction_* which attach-only skips (INV: presentation only).
-                ActionPresentation.FinishDoActionVisual(unit, cate, tile, _log);
-            }
-            else
-            {
-                ActionPresentation.FinishDoActionVisual(unit);
-            }
 
             // Combat kills are absent from CaptureBoard (Host already removed them) — present death
             // before RemoveUnit/Dispose. BUILD/TRAIN orphans stay silent instant remove.
@@ -2364,8 +2443,13 @@ namespace AnnW.LanMp.Sync
                 : null;
             var deferOrphans = doomed != null && doomed.Count > 0;
 
+            // Board + FOW first (radar / build vision) — do not wait on attack VFX.
             ApplyResultAttachment(attachEarly, "DoAction", snapPositions: false,
                 removeMissingUnits: !deferOrphans, applyWrecks: !deferOrphans);
+
+            // Unlock Guest Intent as soon as attach stamped (still inside ApplyQueue).
+            NoteGuestCommandResolved(cmd);
+            SyncContext.PresentationUnlockIntent = true;
 
             if (deferOrphans)
                 yield return CoPresentDeferredDeathsAndWrecks(doomed, attachEarly, attacker: unit);
@@ -2375,8 +2459,19 @@ namespace AnnW.LanMp.Sync
             // Never force-spent after attach — that blocked Guest SET_TRAIN_POS / multi-TRAIN.
             EnsureUnitActedIfAbsentFromAttach(unit, attachEarly);
             ResultAttachmentBridge.RefreshUnactionedLists(_log);
+
+            if (!skipAnim)
+            {
+                yield return ActionPresentation.CoKickDoActionVisual(unit, cate, tile, _log);
+                ActionPresentation.FinishDoActionVisual(unit, cate, tile, _log);
+            }
+            else
+            {
+                ActionPresentation.FinishDoActionVisual(unit);
+            }
+
             _log.LogInfo(
-                $"[Sync] Applied DoAction(attach-only/{tag}) unit={cmd.netUnitId} cate={cate} presentWait={wait:0.###} deaths={doomed?.Count ?? 0}");
+                $"[Sync] Applied DoAction(attach-only/{tag}) unit={cmd.netUnitId} cate={cate} deaths={doomed?.Count ?? 0}");
         }
 
         /// <summary>
@@ -2593,6 +2688,7 @@ namespace AnnW.LanMp.Sync
                 {
                     _log.LogWarning("[Sync] Host DoMove: " + moveErr.Message);
                     ApplyUnitMovedInstant(cmd);
+                    RemoteTurnPresentation.RefreshLocalVision(_log);
                     yield break;
                 }
 
@@ -2603,6 +2699,7 @@ namespace AnnW.LanMp.Sync
                     yield return AnnWCoroutine.NextTick;
                 }
                 _log.LogInfo($"[Sync] Applied UnitMoved(DoMove) unit={cmd.netUnitId} -> ({cmd.targetX},{cmd.targetY})");
+                RemoteTurnPresentation.RefreshLocalVision(_log);
                 yield break;
             }
 
@@ -2613,6 +2710,7 @@ namespace AnnW.LanMp.Sync
                     ApplyUnitMovedInstant(cmd);
                     try { BattleEventBus.self.TriggerFOWChanged(); }
                     catch { /* ignore */ }
+                    RemoteTurnPresentation.RefreshLocalVision(_log);
                     _log.LogInfo($"[Sync] Applied UnitMoved(fast) unit={cmd.netUnitId} -> ({cmd.targetX},{cmd.targetY})");
                     yield break;
                 }
@@ -2643,11 +2741,13 @@ namespace AnnW.LanMp.Sync
                 try { BattleEventBus.self.TriggerFOWChanged(); }
                 catch { /* ignore */ }
                 TryLookAtUnit(unit);
+                RemoteTurnPresentation.RefreshLocalVision(_log);
                 _log.LogInfo($"[Sync] Applied UnitMoved(animated) unit={cmd.netUnitId} -> ({cmd.targetX},{cmd.targetY})");
             }
             else
             {
                 ApplyUnitMovedInstant(cmd);
+                RemoteTurnPresentation.RefreshLocalVision(_log);
             }
         }
 
@@ -2741,6 +2841,7 @@ namespace AnnW.LanMp.Sync
                 if (unit != null)
                     SyncContext.ForceUnitId(unit, cmd.netUnitId);
                 _log.LogInfo($"[Sync] Applied CreateUnit id={cmd.netUnitId} tpl={cmd.templateId}");
+                RemoteTurnPresentation.RefreshLocalVision(_log);
             }
             catch (Exception ex)
             {

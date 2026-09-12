@@ -36,10 +36,29 @@ namespace AnnW.LanMp.Sync
         public static bool AllowVanillaEndGameUi { get; set; }
 
         /// <summary>
-        /// Guest CastSkill presentation runs vanilla <c>DoActionAni</c> for VFX/timing only;
-        /// <c>DoActionCell</c> must no-op (ADR-003 — Host attachment is board truth).
+        /// Guest CastSkill / attach-only presentation: skip <c>DoActionCell</c> re-sim
+        /// (ADR-003 — Host attachment is board truth). Also arms CoroutineObject SafeWrap.
         /// </summary>
         public static bool PresentationSkipActionCell { get; set; }
+
+        /// <summary>
+        /// Depth of <see cref="AnnWCoroutine.SafePump"/> currently driving CoroutineObject.
+        /// Prevents re-wrapping the pump enumerator itself when StartCoroutine Prefix runs.
+        /// </summary>
+        public static int CoroutineSafeWrapDepth { get; set; }
+
+        /// <summary>
+        /// LAN pipelines that must not feed raw vanilla enumerators (null yields / NRE) into
+        /// <see cref="CoroutineObject"/>.
+        /// </summary>
+        public static bool ShouldSafeWrapCoroutineObject()
+        {
+            return SkillCastSuppressEmit
+                   || PresentationSkipActionCell
+                   || ApplyingRemoteCommand
+                   || SuppressNetworkEmit
+                   || InHostTurnSafePump;
+        }
 
         /// <summary>
         /// Host turn SafePump re-entrancy guard — nested StartNextPlayerTurn/EndPlayerTurn
@@ -62,6 +81,14 @@ namespace AnnW.LanMp.Sync
         public static bool HostEndTurnAcceptWaiting { get; set; }
 
         /// <summary>
+        /// After Guest attach stamp is applied, presentation (attack VFX / death lead) may continue
+        /// while ApplyQueue still holds <see cref="ApplyingRemoteCommand"/>. When set, Guest may
+        /// emit the next Intent and UX is not soft-blocked — board truth is already stamped.
+        /// Cleared when the apply pump finishes. Do not set before CastSkill energy attach.
+        /// </summary>
+        public static bool PresentationUnlockIntent { get; set; }
+
+        /// <summary>
         /// INV-SOLO: clear all battle-scoped flags when leaving LAN so stuck Suppress /
         /// PresentationSkip / PreferUnitOwner cannot poison solo/campaign.
         /// </summary>
@@ -78,6 +105,8 @@ namespace AnnW.LanMp.Sync
             InHostTurnSafePump = false;
             SkillCastSuppressEmit = false;
             HostEndTurnAcceptWaiting = false;
+            PresentationUnlockIntent = false;
+            CoroutineSafeWrapDepth = 0;
         }
 
         public static IDisposable BeginRemoteApply()

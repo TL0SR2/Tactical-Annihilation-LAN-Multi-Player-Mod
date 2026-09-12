@@ -7,6 +7,7 @@ using BepInEx.Configuration;
 using BepInEx.Logging;
 using AnnW.LanMp.Authority;
 using AnnW.LanMp.Core;
+using AnnW.LanMp.Presentation;
 using AnnW.LanMp.Protocol;
 using AnnW.LanMp.Sync;
 
@@ -258,6 +259,7 @@ namespace AnnW.LanMp.Checksum
                 try
                 {
                     ResultAttachmentBridge.Apply(wireBoard, _log, snapPositions: true);
+                    RemoteTurnPresentation.RefreshLocalVision(_log);
                 }
                 catch (Exception ex)
                 {
@@ -466,6 +468,7 @@ namespace AnnW.LanMp.Checksum
             try
             {
                 ResultAttachmentBridge.Apply(snap.attachment, _log, snapPositions: true);
+                RemoteTurnPresentation.RefreshLocalVision(_log);
             }
             catch (Exception ex)
             {

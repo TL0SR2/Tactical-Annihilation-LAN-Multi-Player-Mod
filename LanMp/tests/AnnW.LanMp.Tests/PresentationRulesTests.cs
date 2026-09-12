@@ -65,6 +65,34 @@ namespace AnnW.LanMp.Tests
         }
 
         [Theory]
+        [InlineData(true, true)]
+        [InlineData(false, false)]
+        public void ShouldSkipHostAcceptDoActionAnim_cases(bool suppress, bool expected)
+        {
+            Assert.Equal(expected, PresentationRules.ShouldSkipHostAcceptDoActionAnim(suppress));
+        }
+
+        [Theory]
+        [InlineData(1, -1f, 0.2f)]
+        [InlineData(11, -1f, 0.1f)]
+        [InlineData(31, -1f, 0.05f)]
+        [InlineData(5, 0.15f, 0.15f)]
+        public void ResolveMultiShotInterval_cases(int count, float settings, float expected)
+        {
+            Assert.Equal(expected, PresentationRules.ResolveMultiShotInterval(count, settings));
+        }
+
+        [Theory]
+        [InlineData(0, false, false)]
+        [InlineData(3, false, true)]
+        [InlineData(0, true, true)]
+        [InlineData(2, true, true)]
+        public void ShouldLoopDoActionAni_cases(int mulTar, bool parallel, bool expected)
+        {
+            Assert.Equal(expected, PresentationRules.ShouldLoopDoActionAni(mulTar, parallel));
+        }
+
+        [Theory]
         [InlineData(0f, 0.5f, 0.2f, 0f)]
         [InlineData(0.4f, 0.5f, 0.2f, 0.4f)]
         [InlineData(0f, 0f, 0.2f, 0f)]
